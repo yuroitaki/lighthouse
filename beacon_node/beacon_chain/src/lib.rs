@@ -11,6 +11,7 @@ pub mod builder;
 mod errors;
 pub mod eth1_chain;
 pub mod events;
+pub mod harness;
 mod head_tracker;
 mod metrics;
 pub mod migrate;

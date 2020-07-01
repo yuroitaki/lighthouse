@@ -1,0 +1,34 @@
+[package]
+name = "beacon_chain_fuzz"
+version = "0.0.1"
+authors = ["Michael Sproul <michael@sigmaprime.io>"]
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.3"
+bincode = "1.3.1"
+beacon_chain = { path = "..", features = ["arbitrary"] }
+
+# Prevent this from interfering with workspaces
+# [workspace]
+# members = ["."]
+[[bin]]
+name = "parse_exec"
+path = "src/parse_exec.rs"
+
+[[bin]]
+name = "bincode_exec"
+path = "fuzz_targets/bincode_exec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "example_maker"
+path = "fuzz_targets/example_maker.rs"
+test = false
+doc = false
+

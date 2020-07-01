@@ -66,6 +66,8 @@ members = [
 
     "validator_client",
     "validator_client/slashing_protection",
+
+    "beacon_node/beacon_chain/fuzz",
 ]
 
 [patch]

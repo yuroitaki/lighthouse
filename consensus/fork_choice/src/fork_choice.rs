@@ -287,7 +287,7 @@ where
     ///
     /// https://github.com/ethereum/eth2.0-specs/blob/v0.12.1/specs/phase0/fork-choice.md#get_ancestor
     #[allow(clippy::if_same_then_else)]
-    fn get_ancestor(
+    pub fn get_ancestor(
         &self,
         block_root: Hash256,
         ancestor_slot: Slot,

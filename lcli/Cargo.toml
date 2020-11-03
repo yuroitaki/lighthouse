@@ -7,6 +7,7 @@ edition = "2018"
 
 [features]
 portable = ["bls/supranational-portable"]
+fake_crypto = ["bls/fake_crypto"]
 
 [dependencies]
 bls = { path = "../crypto/bls" }

@@ -12,6 +12,7 @@ mod parse_hex;
 mod refund_deposit_contract;
 mod skip_slots;
 mod transition_blocks;
+mod transition_ops;
 
 use clap::{App, Arg, ArgMatches, SubCommand};
 use environment::EnvironmentBuilder;
@@ -23,6 +24,7 @@ use std::process;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use transition_blocks::run_transition_blocks;
+use transition_ops::run_transition_ops;
 use types::{
     test_utils::TestingBeaconStateBuilder, EthSpec, EthSpecId, MainnetEthSpec, MinimalEthSpec,
 };
@@ -127,6 +129,32 @@ fn main() {
                         .takes_value(true)
                         .required(true)
                         .help("Path to a SSZ file of the block to apply to pre-state."),
+                )
+                .arg(
+                    Arg::with_name("output")
+                        .value_name("SSZ_FILE")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("./output.ssz")
+                        .help("Path to output a SSZ file."),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("transition-ops")
+                .about("Performs a state transition given a pre-state and op")
+                .arg(
+                    Arg::with_name("pre-state")
+                        .value_name("BEACON_STATE")
+                        .takes_value(true)
+                        .required(true)
+                        .help("Path to a SSZ file of the pre-state."),
+                )
+                .arg(
+                    Arg::with_name("op")
+                        .value_name("ATTESTER_SLASHING")
+                        .takes_value(true)
+                        .required(true)
+                        .help("Path to a SSZ file of the operation to apply to pre-state."),
                 )
                 .arg(
                     Arg::with_name("output")
@@ -557,6 +585,9 @@ fn run<T: EthSpec>(
         }
         ("transition-blocks", Some(matches)) => run_transition_blocks::<T>(matches)
             .map_err(|e| format!("Failed to transition blocks: {}", e)),
+        ("transition-ops", Some(matches)) => {
+            run_transition_ops::<T>(matches).map_err(|e| format!("Failed to transition ops: {}", e))
+        }
         ("skip-slots", Some(matches)) => {
             skip_slots::run::<T>(matches).map_err(|e| format!("Failed to skip slots: {}", e))
         }

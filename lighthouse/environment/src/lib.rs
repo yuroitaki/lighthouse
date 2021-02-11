@@ -23,7 +23,7 @@ use std::fs::{rename as FsRename, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use task_executor::TaskExecutor;
+pub use task_executor::TaskExecutor;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use types::{EthSpec, MainnetEthSpec, MinimalEthSpec, V012LegacyEthSpec};
 
@@ -319,7 +319,7 @@ pub struct Environment<E: EthSpec> {
     signal_tx: Sender<&'static str>,
     signal: Option<exit_future::Signal>,
     exit: exit_future::Exit,
-    log: Logger,
+    pub log: Logger,
     eth_spec_instance: E,
     pub eth2_config: Eth2Config,
     pub testnet: Option<Eth2NetworkConfig>,

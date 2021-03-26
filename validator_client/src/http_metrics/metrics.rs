@@ -13,6 +13,13 @@ pub const ATTESTATIONS: &str = "attestations";
 pub const AGGREGATES: &str = "aggregates";
 pub const CURRENT_EPOCH: &str = "current_epoch";
 pub const NEXT_EPOCH: &str = "next_epoch";
+pub const UPDATE_INDICES: &str = "update_indices";
+pub const UPDATE_ATTESTERS_CURRENT_EPOCH: &str = "update_attesters_current_epoch";
+pub const UPDATE_ATTESTERS_NEXT_EPOCH: &str = "update_attesters_next_epoch";
+pub const UPDATE_ATTESTERS_FETCH: &str = "update_attesters_fetch";
+pub const UPDATE_ATTESTERS_STORE: &str = "update_attesters_store";
+pub const UPDATE_PROPOSERS: &str = "update_proposers";
+pub const SUBSCRIPTIONS: &str = "subscriptions";
 
 pub use lighthouse_metrics::*;
 
@@ -65,6 +72,10 @@ lazy_static::lazy_static! {
         "Duration to perform attestation service tasks",
         &["task"]
     );
+    pub static ref SLASHING_PROTECTION_PRUNE_TIMES: Result<Histogram> = try_create_histogram(
+        "vc_slashing_protection_prune_times_seconds",
+        "Time required to prune the slashing protection DB",
+    );
     pub static ref BLOCK_SERVICE_TIMES: Result<HistogramVec> = try_create_histogram_vec(
         "vc_beacon_block_service_task_times_seconds",
         "Duration to perform beacon block service tasks",
@@ -79,6 +90,10 @@ lazy_static::lazy_static! {
         "vc_beacon_attester_count",
         "Number of attesters on this host",
         &["task"]
+    );
+    pub static ref PROPOSAL_CHANGED: Result<IntCounter> = try_create_int_counter(
+        "vc_beacon_block_proposal_changed",
+        "A duties update discovered a new block proposer for the current slot",
     );
     /*
      * Endpoint metrics

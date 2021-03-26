@@ -103,10 +103,12 @@ impl ApiTester {
         let (next_block, _next_state) =
             harness.make_block(head.beacon_state.clone(), harness.chain.slot().unwrap());
 
+        let head_state_root = head.beacon_state_root();
         let attestations = harness
             .get_unaggregated_attestations(
                 &AttestationStrategy::AllValidators,
                 &head.beacon_state,
+                head_state_root,
                 head.beacon_block_root,
                 harness.chain.slot().unwrap(),
             )
@@ -234,10 +236,12 @@ impl ApiTester {
         let (next_block, _next_state) =
             harness.make_block(head.beacon_state.clone(), harness.chain.slot().unwrap());
 
+        let head_state_root = head.beacon_state_root();
         let attestations = harness
             .get_unaggregated_attestations(
                 &AttestationStrategy::AllValidators,
                 &head.beacon_state,
+                head_state_root,
                 head.beacon_block_root,
                 harness.chain.slot().unwrap(),
             )
@@ -638,7 +642,6 @@ impl ApiTester {
 
                     let expected = state_opt.map(|state| {
                         let epoch = state.current_epoch();
-                        let finalized_epoch = state.finalized_checkpoint.epoch;
                         let far_future_epoch = self.chain.spec.far_future_epoch;
 
                         let mut validators = Vec::with_capacity(validator_indices.len());
@@ -649,12 +652,14 @@ impl ApiTester {
                             }
                             let validator = state.validators[i as usize].clone();
                             let status = ValidatorStatus::from_validator(
-                                Some(&validator),
+                                &validator,
                                 epoch,
-                                finalized_epoch,
                                 far_future_epoch,
                             );
-                            if statuses.contains(&status) || statuses.is_empty() {
+                            if statuses.contains(&status)
+                                || statuses.is_empty()
+                                || statuses.contains(&status.superstatus())
+                            {
                                 validators.push(ValidatorData {
                                     index: i as u64,
                                     balance: state.balances[i as usize],
@@ -706,16 +711,14 @@ impl ApiTester {
 
                     let expected = {
                         let epoch = state.current_epoch();
-                        let finalized_epoch = state.finalized_checkpoint.epoch;
                         let far_future_epoch = self.chain.spec.far_future_epoch;
 
                         ValidatorData {
                             index: i as u64,
                             balance: state.balances[i],
                             status: ValidatorStatus::from_validator(
-                                Some(&validator),
+                                &validator,
                                 epoch,
-                                finalized_epoch,
                                 far_future_epoch,
                             ),
                             validator: validator.clone(),
@@ -956,16 +959,18 @@ impl ApiTester {
 
     pub async fn test_beacon_blocks(self) -> Self {
         for block_id in self.interesting_block_ids() {
-            let result = self
+            let expected = self.get_block(block_id);
+
+            let json_result = self
                 .client
                 .get_beacon_blocks(block_id)
                 .await
                 .unwrap()
                 .map(|res| res.data);
+            assert_eq!(json_result, expected, "{:?}", block_id);
 
-            let expected = self.get_block(block_id);
-
-            assert_eq!(result, expected, "{:?}", block_id);
+            let ssz_result = self.client.get_beacon_blocks_ssz(block_id).await.unwrap();
+            assert_eq!(ssz_result, expected, "{:?}", block_id);
         }
 
         self
@@ -1444,18 +1449,19 @@ impl ApiTester {
             vec![],
             vec![ValidatorStatus::Active],
             vec![
-                ValidatorStatus::Unknown,
-                ValidatorStatus::WaitingForEligibility,
-                ValidatorStatus::WaitingForFinality,
-                ValidatorStatus::WaitingInQueue,
-                ValidatorStatus::StandbyForActive,
-                ValidatorStatus::Active,
-                ValidatorStatus::ActiveAwaitingVoluntaryExit,
-                ValidatorStatus::ActiveAwaitingSlashedExit,
-                ValidatorStatus::ExitedVoluntarily,
+                ValidatorStatus::PendingInitialized,
+                ValidatorStatus::PendingQueued,
+                ValidatorStatus::ActiveOngoing,
+                ValidatorStatus::ActiveExiting,
+                ValidatorStatus::ActiveSlashed,
+                ValidatorStatus::ExitedUnslashed,
                 ValidatorStatus::ExitedSlashed,
-                ValidatorStatus::Withdrawable,
-                ValidatorStatus::Withdrawn,
+                ValidatorStatus::WithdrawalPossible,
+                ValidatorStatus::WithdrawalDone,
+                ValidatorStatus::Active,
+                ValidatorStatus::Pending,
+                ValidatorStatus::Exited,
+                ValidatorStatus::Withdrawal,
             ],
         ];
         interesting
@@ -1561,50 +1567,117 @@ impl ApiTester {
     pub async fn test_get_validator_duties_proposer(self) -> Self {
         let current_epoch = self.chain.epoch().unwrap();
 
-        let dependent_root = self
-            .chain
-            .root_at_slot(current_epoch.start_slot(E::slots_per_epoch()) - 1)
-            .unwrap()
-            .unwrap_or(self.chain.head_beacon_block_root().unwrap());
+        for epoch in 0..=self.chain.epoch().unwrap().as_u64() {
+            let epoch = Epoch::from(epoch);
 
-        let result = self
-            .client
-            .get_validator_duties_proposer(current_epoch)
-            .await
-            .unwrap();
+            let dependent_root = self
+                .chain
+                .root_at_slot(epoch.start_slot(E::slots_per_epoch()) - 1)
+                .unwrap()
+                .unwrap_or(self.chain.head_beacon_block_root().unwrap());
 
-        let mut state = self.chain.head_beacon_state().unwrap();
+            // Presently, the beacon chain harness never runs the code that primes the proposer
+            // cache. If this changes in the future then we'll need some smarter logic here, but
+            // this is succinct and effective for the time being.
+            assert!(
+                self.chain
+                    .beacon_proposer_cache
+                    .lock()
+                    .get_epoch::<E>(dependent_root, epoch)
+                    .is_none(),
+                "the proposer cache should miss initially"
+            );
 
-        while state.current_epoch() < current_epoch {
-            per_slot_processing(&mut state, None, &self.chain.spec).unwrap();
+            let result = self
+                .client
+                .get_validator_duties_proposer(epoch)
+                .await
+                .unwrap();
+
+            // Check that current-epoch requests prime the proposer cache, whilst non-current
+            // requests don't.
+            if epoch == current_epoch {
+                assert!(
+                    self.chain
+                        .beacon_proposer_cache
+                        .lock()
+                        .get_epoch::<E>(dependent_root, epoch)
+                        .is_some(),
+                    "a current-epoch request should prime the proposer cache"
+                );
+            } else {
+                assert!(
+                    self.chain
+                        .beacon_proposer_cache
+                        .lock()
+                        .get_epoch::<E>(dependent_root, epoch)
+                        .is_none(),
+                    "a non-current-epoch request should not prime the proposer cache"
+                );
+            }
+
+            let mut state = self
+                .chain
+                .state_at_slot(
+                    epoch.start_slot(E::slots_per_epoch()),
+                    StateSkipConfig::WithStateRoots,
+                )
+                .unwrap();
+
+            state
+                .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
+                .unwrap();
+
+            let expected_duties = epoch
+                .slot_iter(E::slots_per_epoch())
+                .map(|slot| {
+                    let index = state
+                        .get_beacon_proposer_index(slot, &self.chain.spec)
+                        .unwrap();
+                    let pubkey = state.validators[index].pubkey.clone().into();
+
+                    ProposerData {
+                        pubkey,
+                        validator_index: index as u64,
+                        slot,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let expected = DutiesResponse {
+                data: expected_duties,
+                dependent_root,
+            };
+
+            assert_eq!(result, expected);
+
+            // If it's the current epoch, check the function with a primed proposer cache.
+            if epoch == current_epoch {
+                // This is technically a double-check, but it's defensive.
+                assert!(
+                    self.chain
+                        .beacon_proposer_cache
+                        .lock()
+                        .get_epoch::<E>(dependent_root, epoch)
+                        .is_some(),
+                    "the request should prime the proposer cache"
+                );
+
+                let result = self
+                    .client
+                    .get_validator_duties_proposer(epoch)
+                    .await
+                    .unwrap();
+
+                assert_eq!(result, expected);
+            }
         }
 
-        state
-            .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
-            .unwrap();
-
-        let expected_duties = current_epoch
-            .slot_iter(E::slots_per_epoch())
-            .map(|slot| {
-                let index = state
-                    .get_beacon_proposer_index(slot, &self.chain.spec)
-                    .unwrap();
-                let pubkey = state.validators[index].pubkey.clone().into();
-
-                ProposerData {
-                    pubkey,
-                    validator_index: index as u64,
-                    slot,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let expected = DutiesResponse {
-            data: expected_duties,
-            dependent_root,
-        };
-
-        assert_eq!(result, expected);
+        // Requests to future epochs should fail.
+        self.client
+            .get_validator_duties_proposer(current_epoch + 1)
+            .await
+            .unwrap_err();
 
         self
     }

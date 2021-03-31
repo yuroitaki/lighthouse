@@ -464,7 +464,7 @@ impl<TSpec: EthSpec> PeerManager<TSpec> {
             RPCError::StreamTimeout => match direction {
                 ConnectionDirection::Incoming => {
                     // we timed out
-                    warn!(self.log, "Timed out to a peer's request. Likely too many resources, reduce peer count");
+                    debug!(self.log, "Timed out to a peer's request. Likely too many resources, reduce peer count");
                     return;
                 }
                 ConnectionDirection::Outgoing => match protocol {

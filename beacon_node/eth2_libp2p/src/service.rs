@@ -44,6 +44,10 @@ pub enum Libp2pEvent<TSpec: EthSpec> {
     NewListenAddr(Multiaddr),
     /// We reached zero listening addresses.
     ZeroListeners,
+    /// Could not connect to a peer.
+    PeerDialedFailed(PeerId),
+    /// Could not connect to a multiaddr
+    PeerAddressDialedFailed(Multiaddr),
 }
 
 /// The configuration and state of the libp2p components for the beacon node.
@@ -315,9 +319,13 @@ impl<TSpec: EthSpec> Service<TSpec> {
                     attempts_remaining,
                 } => {
                     debug!(self.log, "Failed to dial address"; "peer_id" => %peer_id, "address" => %address, "error" => %error, "attempts_remaining" => attempts_remaining);
+                    if attempts_remaining == 0 {
+                        return Libp2pEvent::PeerDialedFailed(peer_id);
+                    }
                 }
                 SwarmEvent::UnknownPeerUnreachableAddr { address, error } => {
                     debug!(self.log, "Peer not known at dialed address"; "address" => %address, "error" => %error);
+                    return Libp2pEvent::PeerAddressDialedFailed(address);
                 }
                 SwarmEvent::ExpiredListenAddr(multiaddr) => {
                     debug!(self.log, "Listen address expired"; "multiaddr" => %multiaddr)

@@ -192,6 +192,8 @@ jobs:
     name: cargo-udeps
     runs-on: ubuntu-latest
     needs: cargo-fmt
+    env:
+      CARGO_LOG: "cargo::ops::registry=debug"
     steps:
     - uses: actions/checkout@v1
     - name: Install Rust (${{ env.PINNED_NIGHTLY }})

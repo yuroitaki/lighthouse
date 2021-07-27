@@ -23,6 +23,7 @@ pub fn run_parse_ssz<T: EthSpec>(matches: &ArgMatches) -> Result<(), String> {
         "block_altair" => decode_and_print::<BeaconBlockAltair<T>>(&bytes)?,
         "state_base" => decode_and_print::<BeaconStateBase<T>>(&bytes)?,
         "state_altair" => decode_and_print::<BeaconStateAltair<T>>(&bytes)?,
+        "state_base_hash" => time_state_hash::<T>(&bytes),
         other => return Err(format!("Unknown type: {}", other)),
     };
 
@@ -39,4 +40,19 @@ fn decode_and_print<T: Decode + Serialize>(bytes: &[u8]) -> Result<(), String> {
     );
 
     Ok(())
+}
+
+fn time_state_hash<T: EthSpec>(bytes: &[u8]) {
+    use std::time::Instant;
+    use tree_hash::TreeHash;
+
+    let mut state = BeaconState::Base(BeaconStateBase::<T>::from_ssz_bytes(bytes).unwrap());
+
+    let t1 = Instant::now();
+    let h1 = state.tree_hash_root();
+    println!("tree_hash_root {:?}: {}ms", h1, t1.elapsed().as_millis());
+
+    let t2 = Instant::now();
+    let h2 = state.update_tree_hash_cache().unwrap();
+    println!("cold cache hash {:?}: {}ms", h2, t2.elapsed().as_millis());
 }

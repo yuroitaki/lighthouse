@@ -23,7 +23,7 @@ pub struct SyncNetworkContext<T: EthSpec> {
     network_send: mpsc::UnboundedSender<NetworkMessage<T>>,
 
     /// Access to the network global vars.
-    network_globals: Arc<NetworkGlobals<T>>,
+    pub network_globals: Arc<NetworkGlobals<T>>,
 
     /// A sequential ID for all RPC requests.
     request_id: SyncRequestId,

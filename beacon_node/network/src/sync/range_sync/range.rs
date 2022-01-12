@@ -257,7 +257,7 @@ where
 
     /// A peer has disconnected. This removes the peer from any ongoing chains and mappings. A
     /// disconnected peer could remove a chain
-    pub fn peer_disconnect(
+    pub fn peer_disconnected(
         &mut self,
         network: &mut SyncNetworkContext<T::EthSpec>,
         peer_id: &PeerId,

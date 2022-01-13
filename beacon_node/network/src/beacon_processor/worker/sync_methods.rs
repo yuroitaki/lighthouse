@@ -39,7 +39,7 @@ impl<T: BeaconChainTypes> Worker<T> {
     pub fn process_rpc_block(
         self,
         block: SignedBeaconBlock<T::EthSpec>,
-        result_tx: BlockResultSender<T::EthSpec>,
+        parent_lookup: bool,
         reprocess_tx: mpsc::Sender<ReprocessQueueMessage<T>>,
         duplicate_cache: DuplicateCache,
     ) {
@@ -72,6 +72,13 @@ impl<T: BeaconChainTypes> Worker<T> {
                 };
             }
 
+
+            let sync_message = if parent_lookup {
+                SyncMessage::ParentLookupBlockProcessed { block_result }
+            } else {
+                SyncMessage::SingleBlockLookupProccessed { block_result }
+            }
+            self.send_sync_message(SyncMessage::BatchProcessed { sync_type, result });
             if result_tx.send(block_result).is_err() {
                 crit!(self.log, "Failed return sync block result");
             }

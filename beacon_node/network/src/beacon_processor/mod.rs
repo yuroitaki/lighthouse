@@ -494,17 +494,17 @@ impl<T: BeaconChainTypes> WorkEvent<T> {
         }
     }
 
-    /// Create a new `Work` event for some block, where the result from computation (if any) is
-    /// sent to the other side of `result_tx`.
+    /// Create a new `Work` event for some block. The result is sent back to the sync manager. The
+    /// second parameter indicates if this process request is part of a parent chain lookup or not.
     pub fn rpc_beacon_block(
         block: Box<SignedBeaconBlock<T::EthSpec>>,
-    ) -> (Self, BlockResultReceiver<T::EthSpec>) {
-        let (result_tx, result_rx) = oneshot::channel();
+        parent_lookup: bool,
+    ) -> Self {
         let event = Self {
             drop_during_sync: false,
-            work: Work::RpcBlock { block, result_tx },
+            work: Work::RpcBlock { block, parent_lookup },
         };
-        (event, result_rx)
+        event
     }
 
     /// Create a new work event to import `blocks` as a beacon chain segment.
@@ -693,8 +693,11 @@ pub enum Work<T: BeaconChainTypes> {
         seen_timestamp: Duration,
     },
     RpcBlock {
+        /// The block to be processed
         block: Box<SignedBeaconBlock<T::EthSpec>>,
-        result_tx: BlockResultSender<T::EthSpec>,
+        /// Whether this was requested by a single block lookup, or part of a chain of parent
+        /// lookups.
+        parent_lookup: bool, 
     },
     ChainSegment {
         process_id: ProcessId,
@@ -1509,10 +1512,10 @@ impl<T: BeaconChainTypes> BeaconProcessor<T> {
                     /*
                      * Verification for beacon blocks received during syncing via RPC.
                      */
-                    Work::RpcBlock { block, result_tx } => {
+                    Work::RpcBlock { block, parent_lookup } => {
                         worker.process_rpc_block(
                             *block,
-                            result_tx,
+                            parent_lookup,
                             work_reprocessing_tx.clone(),
                             duplicate_cache,
                         );

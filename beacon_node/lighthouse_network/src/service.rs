@@ -1,6 +1,7 @@
 use crate::behaviour::{
     save_metadata_to_disk, Behaviour, BehaviourEvent, PeerRequestId, Request, Response,
 };
+use crate::config::NetworkLoad;
 use crate::discovery::enr;
 use crate::multiaddr::Protocol;
 use crate::rpc::{
@@ -107,7 +108,7 @@ impl<TSpec: EthSpec> Service<TSpec> {
             &log,
         ));
 
-        info!(log, "Libp2p Service"; "peer_id" => %enr.peer_id());
+        info!(log, "Libp2p Starting"; "peer_id" => %enr.peer_id(), "bandwidth_config" => format!("{}-{}", config.network_load, NetworkLoad::from(config.network_load).name));
         let discovery_string = if config.disable_discovery {
             "None".into()
         } else {
@@ -280,11 +281,17 @@ impl<TSpec: EthSpec> Service<TSpec> {
     }
 
     /// Report a peer's action.
-    pub fn report_peer(&mut self, peer_id: &PeerId, action: PeerAction, source: ReportSource) {
+    pub fn report_peer(
+        &mut self,
+        peer_id: &PeerId,
+        action: PeerAction,
+        source: ReportSource,
+        msg: &'static str,
+    ) {
         self.swarm
             .behaviour_mut()
             .peer_manager_mut()
-            .report_peer(peer_id, action, source, None);
+            .report_peer(peer_id, action, source, None, msg);
     }
 
     /// Disconnect and ban a peer, providing a reason.

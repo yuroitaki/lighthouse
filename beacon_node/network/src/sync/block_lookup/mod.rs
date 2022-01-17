@@ -148,6 +148,9 @@ impl<T: BeaconChainTypes> BlockLookup<T> {
             Some(block) => {
                 // data was returned, not just a stream termination
                 // check if this is a single block lookup - i.e we were searching for a specific hash
+                // NOTE: We don't remove the lookup from the mapping, because we still wait for the
+                // stream termination or an error.
+                // TODO: Metrics: Update single block lookup size
                 let mut single_block_hash = None;
                 if let Some(block_request) = self.single_block_lookups.get_mut(&request_id) {
                     // update the state of the lookup indicating a block was received from the peer
@@ -155,6 +158,7 @@ impl<T: BeaconChainTypes> BlockLookup<T> {
                     single_block_hash = Some(block_request.hash);
                 }
                 if let Some(block_hash) = single_block_hash {
+                    // Request a single block lookup and return execution to the executor.
                     self.single_block_lookup_response(peer_id, block, block_hash, seen_timestamp, network_context);
                     return;
                 }
@@ -337,7 +341,6 @@ impl<T: BeaconChainTypes> BlockLookup<T> {
         // Send the block to get processed
         let process_id = self.process_block(block, false);
         self.processing_single_blocks.insert(process_id, related_peers); 
-
     }
 
     /// The beacon processor has indicated 

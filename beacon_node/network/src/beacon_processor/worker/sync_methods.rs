@@ -1,6 +1,6 @@
 use super::{super::work_reprocessing_queue::ReprocessQueueMessage, Worker};
 use crate::beacon_processor::worker::FUTURE_SLOT_TOLERANCE;
-use crate::beacon_processor::{BlockResultSender, DuplicateCache};
+use crate::beacon_processor::DuplicateCache;
 use crate::metrics;
 use crate::sync::manager::{SyncMessage, SyncRequestType};
 use crate::sync::{BatchProcessResult, ChainId};
@@ -8,7 +8,7 @@ use beacon_chain::{
     BeaconChainError, BeaconChainTypes, BlockError, ChainSegmentResult, HistoricalBlockError,
 };
 use lighthouse_network::{PeerAction, PeerId};
-use slog::{crit, debug, error, info, trace, warn};
+use slog::{debug, error, info, trace, warn};
 use tokio::sync::mpsc;
 use types::{Epoch, Hash256, SignedBeaconBlock};
 
@@ -19,7 +19,7 @@ pub enum ProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
-    /// Processing Id of the parent lookup of a block.
+    /// Processing Id of the parent lookup of a chain block.
     ParentLookup(PeerId, Hash256),
 }
 
@@ -42,6 +42,7 @@ impl<T: BeaconChainTypes> Worker<T> {
         parent_lookup: bool,
         reprocess_tx: mpsc::Sender<ReprocessQueueMessage<T>>,
         duplicate_cache: DuplicateCache,
+        block_lookup_process_id: usize,
     ) {
         let block_root = block.canonical_root();
         // Checks if the block is already being imported through another source
@@ -72,16 +73,46 @@ impl<T: BeaconChainTypes> Worker<T> {
                 };
             }
 
+            // If the block is a single block lookup, run fork choice and observe the process time.
+            if !parent_lookup {
+                // Block has been processed, so write the block time to the cache.
+                self.chain.block_times_cache.write().set_time_observed(
+                    block_root,
+                    block.slot(),
+                    seen_timestamp,
+                    None,
+                    None,
+                );
+                info!(self.log, "Processed block from RPC lookup"; "block" => %block_root);
+
+                match self.chain.fork_choice() {
+                    Ok(()) => trace!(
+                        self.log,
+                        "Fork choice success";
+                        "location" => "single block"
+                    ),
+                    Err(e) => error!(
+                        self.log,
+                        "Fork choice failed";
+                        "error" => ?e,
+                        "location" => "single block"
+                    ),
+                }
+            }
 
             let sync_message = if parent_lookup {
-                SyncMessage::ParentLookupBlockProcessed { block_result }
+                SyncMessage::ParentLookupBlockProcessed {
+                    block_result,
+                    process_id,
+                }
             } else {
-                SyncMessage::SingleBlockLookupProccessed { block_result }
-            }
-            self.send_sync_message(SyncMessage::BatchProcessed { sync_type, result });
-            if result_tx.send(block_result).is_err() {
-                crit!(self.log, "Failed return sync block result");
-            }
+                SyncMessage::SingleBlockLookupProccessed {
+                    block_result,
+                    process_id,
+                }
+            };
+
+            self.send_sync_message(sync_message);
             // Drop the handle to remove the entry from the cache
             drop(handle);
         } else {
@@ -97,12 +128,20 @@ impl<T: BeaconChainTypes> Worker<T> {
 
             // Here, we assume that the block will eventually be imported and
             // send a `BlockIsAlreadyKnown` message to sync.
-            if result_tx
-                .send(Err(BlockError::BlockIsAlreadyKnown))
-                .is_err()
-            {
-                crit!(self.log, "Failed return sync block result");
-            }
+            let block_result = Err(BlockError::BlockIsAlreadyKnown);
+            let sync_message = if parent_lookup {
+                SyncMessage::ParentLookupBlockProcessed {
+                    block_result,
+                    process_id,
+                }
+            } else {
+                SyncMessage::SingleBlockLookupProccessed {
+                    block_result,
+                    process_id,
+                }
+            };
+
+            self.send_sync_message(sync_message);
         }
     }
 

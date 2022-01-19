@@ -39,10 +39,10 @@ use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{ChainId, RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use super::block_lookup::BlockLookup;
 use super::RequestId;
-use crate::beacon_processor::{WorkEvent as BeaconWorkEvent};
+use crate::beacon_processor::{WorkEvent as BeaconWorkEvent, ProcessId};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
-use beacon_chain::{BeaconChain, BeaconChainTypes};
+use beacon_chain::{BeaconChain, BeaconChainTypes, BlockError};
 use lighthouse_network::rpc::{methods::MAX_REQUEST_BLOCKS};
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::SyncInfo;
@@ -102,6 +102,22 @@ pub enum SyncMessage<T: EthSpec> {
     BatchProcessed {
         sync_type: SyncRequestType,
         result: BatchProcessResult,
+    },
+
+    /// A single block lookup has been processed.
+    SingleBlockLookupProcessed {
+        /// The result of the processing.
+        block_result: Result<Hash256, BlockError<T>>,
+        /// The ID of the process request.
+        process_id: ProcessId,
+    },
+
+    /// A parent/chain block lookup has been processed.
+    ParentLookupProcessResult {
+        /// The result of the processing.
+        block_result: Result<Hash256, BlockError<T>>,
+        /// The ID of the process request.
+        process_id: ProcessId,
     },
 
     /// A parent lookup has failed.
@@ -473,17 +489,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         beacon_block,
                         seen_timestamp,
                     } => {
-                        self.block_lookup.blocks_by_root_response(
+                        self.block_lookup.on_blocks_by_root_response(
                             peer_id,
                             request_id,
                             beacon_block.map(|b| *b),
                             seen_timestamp,
                             &mut self.network,
-                        )
-                        .await;
+                        );
                     }
                     SyncMessage::UnknownBlock(peer_id, block) => {
-                        self.block_lookup.add_unknown_block(peer_id, *block, &mut self.network);
+                        self.block_lookup.add_unknown_block(peer_id, std::collections::HashSet::new(), *block, &mut self.network);
                     }
                     SyncMessage::UnknownBlockHash(peer_id, block_hash) => {
                         self.block_lookup.search_for_block(peer_id, block_hash, &mut self.network);

@@ -499,10 +499,12 @@ impl<T: BeaconChainTypes> WorkEvent<T> {
     pub fn rpc_beacon_block(
         block: Box<SignedBeaconBlock<T::EthSpec>>,
         parent_lookup: bool,
+        process_id: usize,
+        seen_timestamp: Duration,
     ) -> Self {
         let event = Self {
             drop_during_sync: false,
-            work: Work::RpcBlock { block, parent_lookup },
+            work: Work::RpcBlock { block, parent_lookup, process_id, seen_timestamp },
         };
         event
     }
@@ -698,6 +700,10 @@ pub enum Work<T: BeaconChainTypes> {
         /// Whether this was requested by a single block lookup, or part of a chain of parent
         /// lookups.
         parent_lookup: bool, 
+        /// The Id associated with the processing request.
+        process_id: usize,
+        /// The timestamp associated with the beacon block.
+        seen_timestamp: Duration,
     },
     ChainSegment {
         process_id: ProcessId,
@@ -1512,10 +1518,12 @@ impl<T: BeaconChainTypes> BeaconProcessor<T> {
                     /*
                      * Verification for beacon blocks received during syncing via RPC.
                      */
-                    Work::RpcBlock { block, parent_lookup } => {
+                    Work::RpcBlock { block, parent_lookup, process_id, seen_timestamp } => {
                         worker.process_rpc_block(
                             *block,
                             parent_lookup,
+                            process_id,
+                            seen_timestamp,
                             work_reprocessing_tx.clone(),
                             duplicate_cache,
                         );

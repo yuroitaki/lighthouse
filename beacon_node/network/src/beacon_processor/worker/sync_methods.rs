@@ -9,6 +9,7 @@ use beacon_chain::{
 };
 use lighthouse_network::{PeerAction, PeerId};
 use slog::{debug, error, info, trace, warn};
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 use types::{Epoch, Hash256, SignedBeaconBlock};
 
@@ -20,7 +21,7 @@ pub enum ProcessId {
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
     /// Processing Id of the parent lookup of a chain block.
-    ParentLookup(PeerId, Hash256),
+    ParentLookup(HashSet<PeerId>, Hash256),
 }
 
 /// Returned when a chain segment import fails.
@@ -40,11 +41,13 @@ impl<T: BeaconChainTypes> Worker<T> {
         self,
         block: SignedBeaconBlock<T::EthSpec>,
         parent_lookup: bool,
+        process_id: usize,
+        seen_timestamp: std::time::Duration,
         reprocess_tx: mpsc::Sender<ReprocessQueueMessage<T>>,
         duplicate_cache: DuplicateCache,
-        block_lookup_process_id: usize,
     ) {
         let block_root = block.canonical_root();
+        let block_slot = block.slot();
         // Checks if the block is already being imported through another source
         if let Some(handle) = duplicate_cache.check_and_insert(block_root) {
             let slot = block.slot();
@@ -78,7 +81,7 @@ impl<T: BeaconChainTypes> Worker<T> {
                 // Block has been processed, so write the block time to the cache.
                 self.chain.block_times_cache.write().set_time_observed(
                     block_root,
-                    block.slot(),
+                    block_slot,
                     seen_timestamp,
                     None,
                     None,
@@ -106,7 +109,7 @@ impl<T: BeaconChainTypes> Worker<T> {
                     process_id,
                 }
             } else {
-                SyncMessage::SingleBlockLookupProccessed {
+                SyncMessage::SingleBlockLookupProcessed {
                     block_result,
                     process_id,
                 }
@@ -135,7 +138,7 @@ impl<T: BeaconChainTypes> Worker<T> {
                     process_id,
                 }
             } else {
-                SyncMessage::SingleBlockLookupProccessed {
+                SyncMessage::SingleBlockLookupProcessed {
                     block_result,
                     process_id,
                 }
@@ -226,19 +229,24 @@ impl<T: BeaconChainTypes> Worker<T> {
                 self.send_sync_message(SyncMessage::BatchProcessed { sync_type, result });
             }
             // this is a parent lookup request from the sync manager
-            ProcessId::ParentLookup(peer_id, chain_head) => {
+            ProcessId::ParentLookup(related_peers, chain_head) => {
                 debug!(
                     self.log, "Processing parent lookup";
-                    "last_peer_id" => %peer_id,
+                    "related_peers" => related_peers.len(),
                     "blocks" => downloaded_blocks.len()
                 );
                 // parent blocks are ordered from highest slot to lowest, so we need to process in
                 // reverse
                 match self.process_blocks(downloaded_blocks.iter().rev()) {
                     (_, Err(e)) => {
-                        debug!(self.log, "Parent lookup failed"; "last_peer_id" => %peer_id, "error" => %e.message);
+                        if related_peers.len() == 1 {
+                            let peer_id = related_peers.iter().next().expect("Element exists");
+                            debug!(self.log, "Parent lookup failed"; "peer_id" => %peer_id, "error" => %e.message);
+                        } else {
+                            debug!(self.log, "Parent lookup failed"; "related_peers" => related_peers.len(), "error" => %e.message);
+                        }
                         self.send_sync_message(SyncMessage::ParentLookupFailed {
-                            peer_id,
+                            related_peers,
                             chain_head,
                         })
                     }

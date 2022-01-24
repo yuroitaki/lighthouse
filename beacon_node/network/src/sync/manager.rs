@@ -39,7 +39,7 @@ use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{ChainId, RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use super::block_lookup::BlockLookup;
 use super::RequestId;
-use crate::beacon_processor::{WorkEvent as BeaconWorkEvent, ProcessId};
+use crate::beacon_processor::{WorkEvent as BeaconWorkEvent};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockError};
@@ -52,6 +52,7 @@ use std::boxed::Box;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 use types::{Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
@@ -109,15 +110,15 @@ pub enum SyncMessage<T: EthSpec> {
         /// The result of the processing.
         block_result: Result<Hash256, BlockError<T>>,
         /// The ID of the process request.
-        process_id: ProcessId,
+        process_id: usize,
     },
 
     /// A parent/chain block lookup has been processed.
-    ParentLookupProcessResult {
+    ParentLookupBlockProcessed {
         /// The result of the processing.
         block_result: Result<Hash256, BlockError<T>>,
         /// The ID of the process request.
-        process_id: ProcessId,
+        process_id: usize,
     },
 
     /// A parent lookup has failed.
@@ -125,7 +126,7 @@ pub enum SyncMessage<T: EthSpec> {
         /// The head of the chain of blocks that failed to process.
         chain_head: Hash256,
         /// The peer that instigated the chain lookup.
-        peer_id: PeerId,
+        related_peers: HashSet<PeerId>,
     },
 }
 
@@ -267,10 +268,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
 
+    /// A peer has been disconnected, handle all the sync algorithms that could be effected by this
+    /// disconnection.
     fn peer_disconnected(&mut self, peer_id: &PeerId) {
 
         // Inform each of possible sync protocols that a peer has disconnected.
-        self.block_lookup.peer_disconnected(peer_id);
+        self.block_lookup.on_peer_disconnection(peer_id);
         self.range_sync.peer_disconnected(&mut self.network, peer_id);
         // Regardless of the outcome, we update the sync status.
         let _ = self
@@ -534,7 +537,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             None => {
                                 // This is a request not belonging to a sync algorithm.
                                 // Send this to the block lookup logic.
-                                self.block_lookup.inject_error(peer_id, request_id, &mut self.network);
+                                self.block_lookup.on_rpc_error(peer_id, request_id, &mut self.network);
                             }
                         }
                     }
@@ -564,13 +567,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             }
                         }
                     },
+                    SyncMessage::SingleBlockLookupProcessed { block_result, process_id } => self.block_lookup.on_single_block_lookup_result(process_id, block_result, &mut self.network),
+                    SyncMessage::ParentLookupBlockProcessed { block_result, process_id } => self.block_lookup.on_parent_block_lookup_result(process_id, block_result, &mut self.network),
+
                     SyncMessage::ParentLookupFailed {
                         chain_head,
-                        peer_id,
+                        related_peers,
                     } => {
                         // A peer sent an object (block or attestation) that referenced a parent.
                         // The processing of this chain failed.
-                        self.block_lookup.parent_lookup_failed(chain_head, peer_id, &mut self.network);
+                        self.block_lookup.parent_lookup_failed(chain_head, related_peers, &mut self.network);
                     }
                 }
             }

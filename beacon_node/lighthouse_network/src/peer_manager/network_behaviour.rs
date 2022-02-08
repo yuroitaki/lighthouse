@@ -122,7 +122,7 @@ impl<TSpec: EthSpec> NetworkBehaviour for PeerManager<TSpec> {
             // TODO: directly emit the ban event?
             BanResult::BadScore => {
                 // This is a faulty state
-                error!(self.log, "Connecteded to a banned peer, re-banning"; "peer_id" => %peer_id);
+                error!(self.log, "Connected to a banned peer, re-banning"; "peer_id" => %peer_id);
                 // Reban the peer
                 self.goodbye_peer(peer_id, GoodbyeReason::Banned, ReportSource::PeerManager);
                 return;
@@ -161,7 +161,7 @@ impl<TSpec: EthSpec> NetworkBehaviour for PeerManager<TSpec> {
                 self.events
                     .push(PeerManagerEvent::PeerConnectedIncoming(*peer_id));
             }
-            ConnectedPoint::Dialer { address } => {
+            ConnectedPoint::Dialer { address, .. } => {
                 self.inject_connect_outgoing(peer_id, address.clone(), None);
                 self.events
                     .push(PeerManagerEvent::PeerConnectedOutgoing(*peer_id));

@@ -1,5 +1,5 @@
 use clap::ArgMatches;
-use eth2_libp2p::{
+use lighthouse_network::{
     discovery::{build_enr, CombinedKey, CombinedKeyExt, Keypair, ENR_FILENAME},
     NetworkConfig, NETWORK_KEY_FILENAME,
 };
@@ -39,7 +39,7 @@ pub fn run<T: EthSpec>(matches: &ArgMatches) -> Result<(), String> {
         next_fork_version: genesis_fork_version,
         next_fork_epoch: Epoch::max_value(), // FAR_FUTURE_EPOCH
     };
-    let enr = build_enr::<T>(&enr_key, &config, enr_fork_id)
+    let enr = build_enr::<T>(&enr_key, &config, &enr_fork_id)
         .map_err(|e| format!("Unable to create ENR: {:?}", e))?;
 
     fs::create_dir_all(&output_dir).map_err(|e| format!("Unable to create output-dir: {:?}", e))?;
@@ -47,7 +47,7 @@ pub fn run<T: EthSpec>(matches: &ArgMatches) -> Result<(), String> {
     let mut enr_file = File::create(output_dir.join(ENR_FILENAME))
         .map_err(|e| format!("Unable to create {}: {:?}", ENR_FILENAME, e))?;
     enr_file
-        .write_all(&enr.to_base64().as_bytes())
+        .write_all(enr.to_base64().as_bytes())
         .map_err(|e| format!("Unable to write ENR to {}: {:?}", ENR_FILENAME, e))?;
 
     let secret_bytes = match local_keypair {

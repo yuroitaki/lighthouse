@@ -2,17 +2,21 @@
 
 #
 # Starts a validator client based upon a genesis state created by
-# `./local_testnet_genesis_state`.
+# `./setup.sh`.
 #
+# Usage: ./validator_client.sh <DATADIR> <BEACON-NODE-HTTP> <OPTIONAL-DEBUG-LEVEL>
+
+set -Eeuo pipefail
 
 source ./vars.env
 
-DEBUG_LEVEL=${1:-info}
+DEBUG_LEVEL=${3:-info}
 
 exec lighthouse \
 	--debug-level $DEBUG_LEVEL \
 	vc \
-	--datadir $DATADIR \
+	--datadir $1 \
 	--testnet-dir $TESTNET_DIR \
 	--init-slashing-protection \
-	--allow-unsynced
+	--beacon-nodes $2 \
+	$VC_ARGS

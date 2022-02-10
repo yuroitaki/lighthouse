@@ -3,12 +3,13 @@ use crate::{
     generic_signature::{GenericSignature, TSignature},
     Error, INFINITY_SIGNATURE, SIGNATURE_BYTES_LEN,
 };
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::convert::TryInto;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use tree_hash::TreeHash;
 
@@ -84,6 +85,12 @@ impl<Pub, Sig> PartialEq for GenericSignatureBytes<Pub, Sig> {
     }
 }
 
+impl<Pub, Sig> Hash for GenericSignatureBytes<Pub, Sig> {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.bytes.hash(hasher);
+    }
+}
+
 /// Serializes the `GenericSignature` in compressed form, storing the bytes in the newly created `Self`.
 impl<Pub, Sig> From<GenericSignature<Pub, Sig>> for GenericSignatureBytes<Pub, Sig>
 where
@@ -145,6 +152,6 @@ impl<Pub, Sig> fmt::Debug for GenericSignatureBytes<Pub, Sig> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<Pub: 'static, Sig: 'static> arbitrary::Arbitrary for GenericSignatureBytes<Pub, Sig> {
+impl<Pub: 'static, Sig: 'static> arbitrary::Arbitrary<'_> for GenericSignatureBytes<Pub, Sig> {
     impl_arbitrary!(SIGNATURE_BYTES_LEN);
 }

@@ -55,14 +55,10 @@ voting period the validator might have to wait ~3.4 hours for next voting
 period. In times of very, very severe network issues, the network may even fail
 to vote in new Eth1 blocks, stopping all new validator deposits!
 
-> Note: you can see the list of validators included in the beacon chain using
-> our REST API: [/beacon/validators/all](./http/beacon.md#beaconvalidatorsall)
-
 #### 2. Waiting for a validator to be activated
 
 If a validator has provided an invalid public key or signature, they will
-_never_ be activated or even show up in
-[/beacon/validators/all](./http/beacon.html#beaconvalidatorsall).
+_never_ be activated.
 They will simply be forgotten by the beacon chain! But, if those parameters were
 correct, once the Eth1 delays have elapsed and the validator appears in the
 beacon chain, there's _another_ delay before the validator becomes "active"
@@ -133,17 +129,17 @@ same `datadir` as a previous network. I.e if you have been running the
 boot-up).
 
 If you find yourself with a low peer count and is not reaching the target you
-expect. Try setting up the correct port forwards as described in `3.` above.
+expect. Try setting up the correct port forwards as described [here](./advanced_networking.md#nat-traversal-port-forwarding).
 
 ### What should I do if I lose my slashing protection database?
 
-See [here.](./slashing-protection.md#misplaced-slashing-database)
+See [here](./slashing-protection.md#misplaced-slashing-database).
 
 ### How do I update lighthouse?
 
 If you are updating to new release binaries, it will be the same process as described [here.](./installation-binaries.md)
 
-If you are updating by rebuilding from source, see [here.](./installation-source.md#updating-lighthouse)
+If you are updating by rebuilding from source, see [here.](./installation-source.md#update-lighthouse)
 
 If you are running the docker image provided by Sigma Prime on Dockerhub, you can update to specific versions, for example:
 
@@ -161,7 +157,7 @@ See [here.](./installation-source.md#troubleshooting)
 ### What is "Syncing eth1 block cache"
 
 ```
-Nov 30 21:04:28.268 WARN Syncing eth1 block cache   est_blocks_remaining: initializing deposits, msg: sync can take longer when using remote eth1 nodes, service: slot_notifier
+Nov 30 21:04:28.268 WARN Syncing eth1 block cache   est_blocks_remaining: initializing deposits, service: slot_notifier
 ```
 
 This log indicates that your beacon node is downloading blocks and deposits

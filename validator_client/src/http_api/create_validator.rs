@@ -1,4 +1,5 @@
 use crate::ValidatorStore;
+use account_utils::validator_definitions::{SigningDefinition, ValidatorDefinition};
 use account_utils::{
     eth2_wallet::{bip39::Mnemonic, WalletBuilder},
     random_mnemonic, random_password, ZeroizeString,
@@ -21,7 +22,7 @@ use validator_dir::Builder as ValidatorDirBuilder;
 ///
 /// If `key_derivation_path_offset` is supplied then the EIP-2334 validator index will start at
 /// this point.
-pub async fn create_validators<P: AsRef<Path>, T: 'static + SlotClock, E: EthSpec>(
+pub async fn create_validators_mnemonic<P: AsRef<Path>, T: 'static + SlotClock, E: EthSpec>(
     mnemonic_opt: Option<Mnemonic>,
     key_derivation_path_offset: Option<u32>,
     validator_requests: &[api_types::ValidatorRequest],
@@ -97,7 +98,7 @@ pub async fn create_validators<P: AsRef<Path>, T: 'static + SlotClock, E: EthSpe
         let validator_dir = ValidatorDirBuilder::new(validator_dir.as_ref().into())
             .voting_keystore(keystores.voting, voting_password.as_bytes())
             .withdrawal_keystore(keystores.withdrawal, withdrawal_password.as_bytes())
-            .create_eth1_tx_data(request.deposit_gwei, &spec)
+            .create_eth1_tx_data(request.deposit_gwei, spec)
             .store_withdrawal_keystore(false)
             .build()
             .map_err(|e| {
@@ -138,6 +139,7 @@ pub async fn create_validators<P: AsRef<Path>, T: 'static + SlotClock, E: EthSpe
                 voting_password_string,
                 request.enable,
                 request.graffiti.clone(),
+                request.suggested_fee_recipient,
             )
             .await
             .map_err(|e| {
@@ -151,11 +153,43 @@ pub async fn create_validators<P: AsRef<Path>, T: 'static + SlotClock, E: EthSpe
             enabled: request.enable,
             description: request.description.clone(),
             graffiti: request.graffiti.clone(),
+            suggested_fee_recipient: request.suggested_fee_recipient,
             voting_pubkey,
-            eth1_deposit_tx_data: serde_utils::hex::encode(&eth1_deposit_data.rlp),
+            eth1_deposit_tx_data: eth2_serde_utils::hex::encode(&eth1_deposit_data.rlp),
             deposit_gwei: request.deposit_gwei,
         });
     }
 
     Ok((validators, mnemonic))
+}
+
+pub async fn create_validators_web3signer<T: 'static + SlotClock, E: EthSpec>(
+    validator_requests: &[api_types::Web3SignerValidatorRequest],
+    validator_store: &ValidatorStore<T, E>,
+) -> Result<(), warp::Rejection> {
+    for request in validator_requests {
+        let validator_definition = ValidatorDefinition {
+            enabled: request.enable,
+            voting_public_key: request.voting_public_key.clone(),
+            graffiti: request.graffiti.clone(),
+            suggested_fee_recipient: request.suggested_fee_recipient,
+            description: request.description.clone(),
+            signing_definition: SigningDefinition::Web3Signer {
+                url: request.url.clone(),
+                root_certificate_path: request.root_certificate_path.clone(),
+                request_timeout_ms: request.request_timeout_ms,
+            },
+        };
+        validator_store
+            .add_validator(validator_definition)
+            .await
+            .map_err(|e| {
+                warp_utils::reject::custom_server_error(format!(
+                    "failed to initialize validator: {:?}",
+                    e
+                ))
+            })?;
+    }
+
+    Ok(())
 }

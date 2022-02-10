@@ -1,8 +1,9 @@
+use logging::test_logger;
 use maplit::hashset;
 use rayon::prelude::*;
 use slasher::{
     config::DEFAULT_CHUNK_SIZE,
-    test_utils::{att_slashing, indexed_att, logger, slashed_validators_from_slashings, E},
+    test_utils::{att_slashing, indexed_att, slashed_validators_from_slashings, E},
     Config, Slasher,
 };
 use std::collections::HashSet;
@@ -171,7 +172,7 @@ fn slasher_test(
 ) {
     let tempdir = tempdir().unwrap();
     let config = Config::new(tempdir.path().into());
-    let slasher = Slasher::open(config, logger()).unwrap();
+    let slasher = Slasher::open(config, test_logger()).unwrap();
     let current_epoch = Epoch::new(current_epoch);
 
     for (i, attestation) in attestations.iter().enumerate() {
@@ -189,6 +190,8 @@ fn slasher_test(
 
     // Pruning should not error.
     slasher.prune_database(current_epoch).unwrap();
+    // windows won't delete the temporary directory if you don't do this..
+    drop(slasher);
 }
 
 fn parallel_slasher_test(
@@ -198,7 +201,7 @@ fn parallel_slasher_test(
 ) {
     let tempdir = tempdir().unwrap();
     let config = Config::new(tempdir.path().into());
-    let slasher = Slasher::open(config, logger()).unwrap();
+    let slasher = Slasher::open(config, test_logger()).unwrap();
     let current_epoch = Epoch::new(current_epoch);
 
     attestations
@@ -212,4 +215,6 @@ fn parallel_slasher_test(
     let slashings = slasher.get_attester_slashings();
     let slashed_validators = slashed_validators_from_slashings(&slashings);
     assert_eq!(slashed_validators, expected_slashed_validators);
+    // windows won't delete the temporary directory if you don't do this..
+    drop(slasher);
 }

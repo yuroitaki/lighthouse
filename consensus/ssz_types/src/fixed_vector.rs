@@ -1,8 +1,9 @@
 use crate::tree_hash::vec_tree_hash_root;
 use crate::Error;
+use derivative::Derivative;
 use serde_derive::{Deserialize, Serialize};
 use std::marker::PhantomData;
-use std::ops::{Deref, Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::slice::SliceIndex;
 use tree_hash::Hash256;
 use typenum::Unsigned;
@@ -44,7 +45,8 @@ pub use typenum;
 /// let long: FixedVector<_, typenum::U5> = FixedVector::from(base);
 /// assert_eq!(&long[..], &[1, 2, 3, 4, 0]);
 /// ```
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Derivative)]
+#[derivative(PartialEq, Hash(bound = "T: std::hash::Hash"))]
 #[serde(transparent)]
 pub struct FixedVector<T, N> {
     vec: Vec<T>,
@@ -108,9 +110,9 @@ impl<T: Default, N: Unsigned> From<Vec<T>> for FixedVector<T, N> {
     }
 }
 
-impl<T, N: Unsigned> Into<Vec<T>> for FixedVector<T, N> {
-    fn into(self) -> Vec<T> {
-        self.vec
+impl<T, N: Unsigned> From<FixedVector<T, N>> for Vec<T> {
+    fn from(vector: FixedVector<T, N>) -> Vec<T> {
+        vector.vec
     }
 }
 
@@ -144,6 +146,16 @@ impl<T, N: Unsigned> Deref for FixedVector<T, N> {
 
     fn deref(&self) -> &[T] {
         &self.vec[..]
+    }
+}
+
+// This implementation is required to use `get_mut` to access elements.
+//
+// It's safe because none of the methods on mutable slices allow changing the length
+// of the backing vec.
+impl<T, N: Unsigned> DerefMut for FixedVector<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.vec[..]
     }
 }
 
@@ -210,7 +222,7 @@ where
 
 impl<T, N: Unsigned> ssz::Decode for FixedVector<T, N>
 where
-    T: ssz::Decode + Default,
+    T: ssz::Decode,
 {
     fn is_ssz_fixed_len() -> bool {
         T::is_ssz_fixed_len()
@@ -250,25 +262,30 @@ where
                 .map(|chunk| T::from_ssz_bytes(chunk))
                 .collect::<Result<Vec<T>, _>>()
                 .and_then(|vec| {
-                    if vec.len() == fixed_len {
-                        Ok(vec.into())
-                    } else {
-                        Err(ssz::DecodeError::BytesInvalid(format!(
-                            "Wrong number of FixedVector elements, got: {}, expected: {}",
-                            vec.len(),
-                            N::to_usize()
-                        )))
-                    }
+                    Self::new(vec).map_err(|e| {
+                        ssz::DecodeError::BytesInvalid(format!(
+                            "Wrong number of FixedVector elements: {:?}",
+                            e
+                        ))
+                    })
                 })
         } else {
-            ssz::decode_list_of_variable_length_items(bytes, Some(fixed_len)).map(|vec| vec.into())
+            let vec = ssz::decode_list_of_variable_length_items(bytes, Some(fixed_len))?;
+            Self::new(vec).map_err(|e| {
+                ssz::DecodeError::BytesInvalid(format!(
+                    "Wrong number of FixedVector elements: {:?}",
+                    e
+                ))
+            })
         }
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<T: arbitrary::Arbitrary, N: 'static + Unsigned> arbitrary::Arbitrary for FixedVector<T, N> {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+impl<'a, T: arbitrary::Arbitrary<'a>, N: 'static + Unsigned> arbitrary::Arbitrary<'a>
+    for FixedVector<T, N>
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let size = N::to_usize();
         let mut vec: Vec<T> = Vec::with_capacity(size);
         for _ in 0..size {
@@ -351,7 +368,7 @@ mod test {
     fn ssz_round_trip<T: Encode + Decode + std::fmt::Debug + PartialEq>(item: T) {
         let encoded = &item.as_ssz_bytes();
         assert_eq!(item.ssz_bytes_len(), encoded.len());
-        assert_eq!(T::from_ssz_bytes(&encoded), Ok(item));
+        assert_eq!(T::from_ssz_bytes(encoded), Ok(item));
     }
 
     #[test]

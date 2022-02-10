@@ -1,8 +1,8 @@
 use crate::generic_public_key_bytes::GenericPublicKeyBytes;
 use crate::Error;
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -27,7 +27,7 @@ pub trait TPublicKey: Sized + Clone {
     fn deserialize(bytes: &[u8]) -> Result<Self, Error>;
 }
 
-/// A BLS aggregate public key that is generic across some BLS point (`Pub`).
+/// A BLS public key that is generic across some BLS point (`Pub`).
 ///
 /// Provides generic functionality whilst deferring all serious cryptographic operations to `Pub`.
 #[derive(Clone)]
@@ -51,7 +51,7 @@ where
     }
 
     /// Returns `self.serialize()` as a `0x`-prefixed hex string.
-    pub fn to_hex_string(&self) -> String {
+    pub fn as_hex_string(&self) -> String {
         format!("{:?}", self)
     }
 
@@ -125,6 +125,6 @@ impl<Pub: TPublicKey> fmt::Debug for GenericPublicKey<Pub> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<Pub: TPublicKey + 'static> arbitrary::Arbitrary for GenericPublicKey<Pub> {
+impl<Pub: TPublicKey + 'static> arbitrary::Arbitrary<'_> for GenericPublicKey<Pub> {
     impl_arbitrary!(PUBLIC_KEY_BYTES_LEN);
 }

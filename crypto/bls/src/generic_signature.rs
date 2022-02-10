@@ -2,11 +2,12 @@ use crate::{
     generic_public_key::{GenericPublicKey, TPublicKey},
     Error, Hash256,
 };
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use tree_hash::TreeHash;
 
@@ -145,6 +146,13 @@ impl<PublicKey, T: TSignature<PublicKey>> TreeHash for GenericSignature<PublicKe
     impl_tree_hash!(SIGNATURE_BYTES_LEN);
 }
 
+/// Hashes the `self.serialize()` bytes.
+impl<PublicKey, T: TSignature<PublicKey>> Hash for GenericSignature<PublicKey, T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.serialize().hash(state);
+    }
+}
+
 impl<PublicKey, T: TSignature<PublicKey>> fmt::Display for GenericSignature<PublicKey, T> {
     impl_display!();
 }
@@ -166,7 +174,7 @@ impl<PublicKey, T: TSignature<PublicKey>> fmt::Debug for GenericSignature<Public
 }
 
 #[cfg(feature = "arbitrary")]
-impl<PublicKey: 'static, T: TSignature<PublicKey> + 'static> arbitrary::Arbitrary
+impl<PublicKey: 'static, T: TSignature<PublicKey> + 'static> arbitrary::Arbitrary<'_>
     for GenericSignature<PublicKey, T>
 {
     impl_arbitrary!(SIGNATURE_BYTES_LEN);

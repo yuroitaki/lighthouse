@@ -1,12 +1,12 @@
-FROM rust:1.50.0 AS builder
-RUN apt-get update && apt-get install -y cmake
+FROM rust:1.58.1-bullseye AS builder
+RUN apt-get update && apt-get -y upgrade && apt-get install -y cmake libclang-dev
 COPY . lighthouse
-ARG PORTABLE
-ENV PORTABLE $PORTABLE
+ARG FEATURES
+ENV FEATURES $FEATURES
 RUN cd lighthouse && make
 
-FROM debian:buster-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM ubuntu:latest
+RUN apt-get update && apt-get -y upgrade && apt-get install -y --no-install-recommends \
   libssl-dev \
   ca-certificates \
   && apt-get clean \

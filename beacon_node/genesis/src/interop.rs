@@ -3,7 +3,12 @@ use eth2_hashing::hash;
 use rayon::prelude::*;
 use ssz::Encode;
 use state_processing::initialize_beacon_state_from_eth1;
-use types::{BeaconState, ChainSpec, DepositData, EthSpec, Hash256, Keypair, PublicKey, Signature};
+use types::{
+    BeaconState, ChainSpec, DepositData, EthSpec, ExecutionPayloadHeader, Hash256, Keypair,
+    PublicKey, Signature,
+};
+
+pub const DEFAULT_ETH1_BLOCK_HASH: &[u8] = &[0x42; 32];
 
 /// Builds a genesis state as defined by the Eth2 interop procedure (see below).
 ///
@@ -12,9 +17,10 @@ use types::{BeaconState, ChainSpec, DepositData, EthSpec, Hash256, Keypair, Publ
 pub fn interop_genesis_state<T: EthSpec>(
     keypairs: &[Keypair],
     genesis_time: u64,
+    eth1_block_hash: Hash256,
+    execution_payload_header: Option<ExecutionPayloadHeader<T>>,
     spec: &ChainSpec,
 ) -> Result<BeaconState<T>, String> {
-    let eth1_block_hash = Hash256::from_slice(&[0x42; 32]);
     let eth1_timestamp = 2_u64.pow(40);
     let amount = spec.max_effective_balance;
 
@@ -44,14 +50,17 @@ pub fn interop_genesis_state<T: EthSpec>(
         eth1_block_hash,
         eth1_timestamp,
         genesis_deposits(datas, spec)?,
+        execution_payload_header,
         spec,
     )
     .map_err(|e| format!("Unable to initialize genesis state: {:?}", e))?;
 
-    state.genesis_time = genesis_time;
+    *state.genesis_time_mut() = genesis_time;
 
-    // Invalid all the caches after all the manual state surgery.
-    state.drop_all_caches();
+    // Invalidate all the caches after all the manual state surgery.
+    state
+        .drop_all_caches()
+        .map_err(|e| format!("Unable to drop caches: {:?}", e))?;
 
     Ok(state)
 }
@@ -71,28 +80,35 @@ mod test {
 
         let keypairs = generate_deterministic_keypairs(validator_count);
 
-        let state = interop_genesis_state::<TestEthSpec>(&keypairs, genesis_time, spec)
-            .expect("should build state");
+        let state = interop_genesis_state::<TestEthSpec>(
+            &keypairs,
+            genesis_time,
+            Hash256::from_slice(DEFAULT_ETH1_BLOCK_HASH),
+            None,
+            spec,
+        )
+        .expect("should build state");
 
         assert_eq!(
-            state.eth1_data.block_hash,
+            state.eth1_data().block_hash,
             Hash256::from_slice(&[0x42; 32]),
             "eth1 block hash should be co-ordinated junk"
         );
 
         assert_eq!(
-            state.genesis_time, genesis_time,
+            state.genesis_time(),
+            genesis_time,
             "genesis time should be as specified"
         );
 
-        for b in &state.balances {
+        for b in state.balances() {
             assert_eq!(
                 *b, spec.max_effective_balance,
                 "validator balances should be max effective balance"
             );
         }
 
-        for v in &state.validators {
+        for v in state.validators() {
             let creds = v.withdrawal_credentials.as_bytes();
             assert_eq!(
                 creds[0], spec.bls_withdrawal_prefix_byte,
@@ -106,13 +122,13 @@ mod test {
         }
 
         assert_eq!(
-            state.balances.len(),
+            state.balances().len(),
             validator_count,
             "validator balances len should be correct"
         );
 
         assert_eq!(
-            state.validators.len(),
+            state.validators().len(),
             validator_count,
             "validator count should be correct"
         );

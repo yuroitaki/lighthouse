@@ -53,7 +53,7 @@ Lighthouse maintains two permanent branches:
 - [`stable`][stable]: Always points to the latest stable release.
   - This is ideal for most users.
 - [`unstable`][unstable]: Used for development, contains the latest PRs.
-  - Developers should base thier PRs on this branch.
+  - Developers should base their PRs on this branch.
 
 ## Contributing
 
@@ -66,8 +66,7 @@ of the Lighthouse book.
 ## Contact
 
 The best place for discussion is the [Lighthouse Discord
-server](https://discord.gg/cyAszAh). Alternatively, you may use the
-[sigp/lighthouse gitter](https://gitter.im/sigp/lighthouse).
+server](https://discord.gg/cyAszAh). 
 
 Sign up to the [Lighthouse Development Updates](http://eepurl.com/dh9Lvb) mailing list for email
 notifications about releases, network status and other important information.

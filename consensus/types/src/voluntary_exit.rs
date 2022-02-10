@@ -12,11 +12,13 @@ use tree_hash_derive::TreeHash;
 ///
 /// Spec v0.12.1
 #[cfg_attr(feature = "arbitrary-fuzz", derive(arbitrary::Arbitrary))]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom)]
+#[derive(
+    Debug, PartialEq, Hash, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom,
+)]
 pub struct VoluntaryExit {
     /// Earliest epoch when voluntary exit can be processed.
     pub epoch: Epoch,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub validator_index: u64,
 }
 

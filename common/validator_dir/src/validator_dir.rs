@@ -63,7 +63,7 @@ pub struct Eth1DepositData {
 pub struct ValidatorDir {
     dir: PathBuf,
     #[derivative(PartialEq = "ignore")]
-    lockfile: Lockfile,
+    _lockfile: Lockfile,
 }
 
 impl ValidatorDir {
@@ -85,11 +85,14 @@ impl ValidatorDir {
         let lockfile_path = dir.join(format!("{}.lock", VOTING_KEYSTORE_FILE));
         let lockfile = Lockfile::new(lockfile_path).map_err(Error::LockfileError)?;
 
-        Ok(Self { dir, lockfile })
+        Ok(Self {
+            dir,
+            _lockfile: lockfile,
+        })
     }
 
     /// Returns the `dir` provided to `Self::open`.
-    pub fn dir(&self) -> &PathBuf {
+    pub fn dir(&self) -> &Path {
         &self.dir
     }
 
@@ -204,7 +207,7 @@ impl ValidatorDir {
 
 /// Attempts to load and decrypt a Keypair given path to the keystore.
 pub fn unlock_keypair<P: AsRef<Path>>(
-    keystore_path: &PathBuf,
+    keystore_path: &Path,
     password_dir: P,
 ) -> Result<Keypair, Error> {
     let keystore = Keystore::from_json_reader(
@@ -229,8 +232,8 @@ pub fn unlock_keypair<P: AsRef<Path>>(
 
 /// Attempts to load and decrypt a Keypair given path to the keystore and the password file.
 pub fn unlock_keypair_from_password_path(
-    keystore_path: &PathBuf,
-    password_path: &PathBuf,
+    keystore_path: &Path,
+    password_path: &Path,
 ) -> Result<Keypair, Error> {
     let keystore = Keystore::from_json_reader(
         &mut OpenOptions::new()
@@ -242,7 +245,7 @@ pub fn unlock_keypair_from_password_path(
     .map_err(Error::UnableToReadKeystore)?;
 
     let password: PlainText = read(password_path)
-        .map_err(|_| Error::UnableToReadPassword(password_path.clone()))?
+        .map_err(|_| Error::UnableToReadPassword(password_path.into()))?
         .into();
     keystore
         .decrypt_keypair(password.as_bytes())

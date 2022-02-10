@@ -21,7 +21,11 @@ pub struct BlsAggregateVerify {
 impl BlsCase for BlsAggregateVerify {}
 
 impl Case for BlsAggregateVerify {
-    fn result(&self, _case_index: usize) -> Result<(), Error> {
+    fn is_enabled_for_fork(fork_name: ForkName) -> bool {
+        fork_name == ForkName::Base
+    }
+
+    fn result(&self, _case_index: usize, _fork_name: ForkName) -> Result<(), Error> {
         let messages = self
             .input
             .messages

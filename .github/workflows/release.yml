@@ -20,74 +20,6 @@ jobs:
               id: extract_version
         outputs:
             VERSION: ${{ steps.extract_version.outputs.VERSION }}
-
-    build-docker-arm64:
-        runs-on: ubuntu-18.04
-        needs: [extract-version]
-        # We need to enable experimental docker features in order to use `docker buildx`
-        env:
-            DOCKER_CLI_EXPERIMENTAL: enabled
-            VERSION: ${{ needs.extract-version.outputs.VERSION }}
-        steps:
-            - uses: actions/checkout@v2
-            - name: Update Rust
-              run: rustup update stable
-            - name: Dockerhub login
-              run: |
-                  echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
-            - name: Cross build lighthouse binary
-              run:  |
-                  cargo install cross
-                  make build-aarch64-portable
-            - name: Move cross-built ARM binary into Docker scope
-              run: |
-                  mkdir ./bin;
-                  mv ./target/aarch64-unknown-linux-gnu/release/lighthouse ./bin;
-            # Install dependencies for emulation. Have to create a new builder to pick up emulation support.
-            - name: Build ARM64 dockerfile (with push)
-              run: |
-                  docker run --privileged --rm tonistiigi/binfmt --install arm64
-                  docker buildx create --use --name cross-builder
-                  docker buildx build \
-                      --platform=linux/arm64 \
-                      --file ./Dockerfile.cross . \
-                      --tag ${IMAGE_NAME}:${{ env.VERSION }}-arm64 \
-                      --push
-    build-docker-amd64:
-        runs-on: ubuntu-18.04
-        needs: [extract-version]
-        env:
-            DOCKER_CLI_EXPERIMENTAL: enabled
-            VERSION: ${{ needs.extract-version.outputs.VERSION }}
-        steps:
-            - uses: actions/checkout@v2
-            - name: Dockerhub login
-              run: |
-                  echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
-            - name: Build AMD64 dockerfile (with push)
-              run: |
-                  docker build \
-                      --build-arg PORTABLE=true \
-                      --tag ${IMAGE_NAME}:${{ env.VERSION }}-amd64 \
-                      --file ./Dockerfile .
-                  docker push ${IMAGE_NAME}:${{ env.VERSION }}-amd64
-    build-docker-multiarch:
-        runs-on: ubuntu-18.04
-        needs: [build-docker-arm64, build-docker-amd64, extract-version]
-        # We need to enable experimental docker features in order to use `docker manifest`
-        env:
-            DOCKER_CLI_EXPERIMENTAL: enabled
-            VERSION: ${{ needs.extract-version.outputs.VERSION }}
-        steps:
-            - name: Dockerhub login
-              run: |
-                  echo "${DOCKER_PASSWORD}" | docker login --username ${DOCKER_USERNAME} --password-stdin
-            - name: Create and push multiarch manifest
-              run: |
-                  docker manifest create ${IMAGE_NAME}:${{ env.VERSION }} \
-                      --amend ${IMAGE_NAME}:${{ env.VERSION }}-arm64 \
-                      --amend ${IMAGE_NAME}:${{ env.VERSION }}-amd64;
-                  docker manifest push ${IMAGE_NAME}:${{ env.VERSION }}
     build:
         name:   Build Release
         strategy:
@@ -97,7 +29,9 @@ jobs:
                        x86_64-unknown-linux-gnu,
                        x86_64-unknown-linux-gnu-portable,
                        x86_64-apple-darwin,
-                       x86_64-apple-darwin-portable]
+                       x86_64-apple-darwin-portable,
+                       x86_64-windows,
+                       x86_64-windows-portable]
                 include:
                     -   arch: aarch64-unknown-linux-gnu
                         platform: ubuntu-latest
@@ -111,6 +45,10 @@ jobs:
                         platform: macos-latest
                     -   arch: x86_64-apple-darwin-portable
                         platform: macos-latest
+                    -   arch: x86_64-windows
+                        platform: windows-latest
+                    -   arch: x86_64-windows-portable
+                        platform: windows-latest
 
         runs-on:    ${{ matrix.platform }}
         needs: extract-version
@@ -123,6 +61,19 @@ jobs:
                   toolchain: stable
                   profile:  minimal
                   override: true
+
+            # ==============================
+            # Windows dependencies
+            # ==============================
+
+            - uses: KyleMayes/install-llvm-action@v1
+              if: startsWith(matrix.arch, 'x86_64-windows')
+              with:
+                version: "13.0"
+                directory: ${{ runner.temp }}/llvm
+            - name: Set LIBCLANG_PATH
+              if: startsWith(matrix.arch, 'x86_64-windows')
+              run: echo "LIBCLANG_PATH=$((gcm clang).source -replace "clang.exe")" >> $env:GITHUB_ENV
 
             # ==============================
             #       Builds
@@ -162,13 +113,22 @@ jobs:
 
             - name: Build Lighthouse for x86_64-apple-darwin portable
               if:   matrix.arch == 'x86_64-apple-darwin-portable'
-              run:  cargo install --path lighthouse --force --locked --features portable
+              run:  cargo install --path lighthouse --force --locked --features portable,gnosis
 
             - name: Build Lighthouse for x86_64-apple-darwin modern
               if:   matrix.arch == 'x86_64-apple-darwin'
-              run:  cargo install --path lighthouse --force --locked --features modern
+              run:  cargo install --path lighthouse --force --locked --features modern,gnosis
+
+            - name: Build Lighthouse for Windows portable
+              if:   matrix.arch == 'x86_64-windows-portable'
+              run:  cargo install --path lighthouse --force --locked --features portable,gnosis
+
+            - name: Build Lighthouse for Windows modern
+              if:   matrix.arch == 'x86_64-windows'
+              run:  cargo install --path lighthouse --force --locked --features modern,gnosis
 
             - name: Configure GPG and create artifacts
+              if: startsWith(matrix.arch, 'x86_64-windows') != true
               env:
                   GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
                   GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
@@ -181,6 +141,20 @@ jobs:
                   tar -czf lighthouse-${{ needs.extract-version.outputs.VERSION }}-${{ matrix.arch }}.tar.gz lighthouse
                   echo "$GPG_PASSPHRASE" | gpg --passphrase-fd 0 --pinentry-mode loopback --batch -ab lighthouse-${{ needs.extract-version.outputs.VERSION }}-${{ matrix.arch }}.tar.gz
                   mv *tar.gz* ..
+
+            - name: Configure GPG and create artifacts Windows
+              if: startsWith(matrix.arch, 'x86_64-windows')
+              env:
+                  GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+                  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+              run: |
+                  echo $env:GPG_SIGNING_KEY | gpg --batch --import
+                  mkdir artifacts
+                  move $env:USERPROFILE/.cargo/bin/lighthouse.exe ./artifacts
+                  cd artifacts
+                  tar -czf lighthouse-${{ needs.extract-version.outputs.VERSION }}-${{ matrix.arch }}.tar.gz lighthouse.exe
+                  gpg --passphrase "$env:GPG_PASSPHRASE" --batch --pinentry-mode loopback -ab lighthouse-${{ needs.extract-version.outputs.VERSION }}-${{ matrix.arch }}.tar.gz
+                  move *tar.gz* ..
 
             # =======================================================================
             # Upload artifacts
@@ -237,6 +211,23 @@ jobs:
                   body=$(cat <<- "ENDBODY"
                   <Rick and Morty character>
 
+                  ## Testing Checklist (DELETE ME)
+
+                  - [ ] Run on synced Pyrmont Sigma Prime nodes.
+                  - [ ] Run on synced Prater Sigma Prime nodes.
+                  - [ ] Run on synced Canary (mainnet) Sigma Prime nodes.
+                  - [ ] Resync a Pyrmont node.
+                  - [ ] Resync a Prater node.
+                  - [ ] Resync a mainnet node.
+
+                  ## Release Checklist (DELETE ME)
+
+                  - [ ] Merge `unstable` -> `stable`.
+                  - [ ] Ensure docker images are published (check `latest` and the version tag).
+                  - [ ] Prepare Discord post.
+                  - [ ] Prepare Twitter post.
+                  - [ ] Prepare mailing list email.
+
                   ## Summary
 
                   Add a summary.
@@ -259,6 +250,8 @@ jobs:
                   | <img src="https://simpleicons.org/icons/linux.svg" style="width: 32px;"/> | x86_64 | [lighthouse-${{ env.VERSION }}-x86_64-unknown-linux-gnu-portable.tar.gz](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-unknown-linux-gnu-portable.tar.gz) | [PGP Signature](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-unknown-linux-gnu-portable.tar.gz.asc) |
                   | <img src="https://simpleicons.org/icons/raspberrypi.svg" style="width: 32px;"/> | aarch64 | [lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu.tar.gz](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu.tar.gz) | [PGP Signature](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu.tar.gz.asc) |
                   | <img src="https://simpleicons.org/icons/raspberrypi.svg" style="width: 32px;"/> | aarch64 | [lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu-portable.tar.gz](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu-portable.tar.gz) | [PGP Signature](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-aarch64-unknown-linux-gnu-portable.tar.gz.asc) |
+                  | <img src="https://simpleicons.org/icons/windows.svg" style="width: 32px;"/> | x86_64 | [lighthouse-${{ env.VERSION }}-x86_64-windows.tar.gz](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-windows.tar.gz) | [PGP Signature](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-windows.tar.gz.asc) |
+                  | <img src="https://simpleicons.org/icons/windows.svg" style="width: 32px;"/> | x86_64 | [lighthouse-${{ env.VERSION }}-x86_64-windows-portable.tar.gz](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-windows-portable.tar.gz) | [PGP Signature](https://github.com/${{ env.REPO_NAME }}/releases/download/${{ env.VERSION }}/lighthouse-${{ env.VERSION }}-x86_64-windows-portable.tar.gz.asc) |
                   | | | | |
                   | **System** | **Option** | - | **Resource** |
                   | <img src="https://simpleicons.org/icons/docker.svg" style="width: 32px;"/> | Docker | [${{ env.VERSION }}](https://hub.docker.com/r/${{ env.IMAGE_NAME }}/tags?page=1&ordering=last_updated&name=${{ env.VERSION }}) | [${{ env.IMAGE_NAME }}](https://hub.docker.com/r/${{ env.IMAGE_NAME }}) |

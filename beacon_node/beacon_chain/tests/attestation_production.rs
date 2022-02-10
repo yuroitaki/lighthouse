@@ -1,13 +1,8 @@
 #![cfg(not(debug_assertions))]
 
-#[macro_use]
-extern crate lazy_static;
-
-use beacon_chain::{
-    test_utils::{AttestationStrategy, BeaconChainHarness, BlockStrategy},
-    StateSkipConfig,
-};
-use store::config::StoreConfig;
+use beacon_chain::test_utils::{AttestationStrategy, BeaconChainHarness, BlockStrategy};
+use beacon_chain::{StateSkipConfig, WhenSlotSkipped};
+use lazy_static::lazy_static;
 use tree_hash::TreeHash;
 use types::{AggregateSignature, EthSpec, Keypair, MainnetEthSpec, RelativeEpoch, Slot};
 
@@ -27,11 +22,11 @@ fn produces_attestations() {
     let num_blocks_produced = MainnetEthSpec::slots_per_epoch() * 4;
     let additional_slots_tested = MainnetEthSpec::slots_per_epoch() * 3;
 
-    let harness = BeaconChainHarness::new_with_store_config(
-        MainnetEthSpec,
-        KEYPAIRS[..].to_vec(),
-        StoreConfig::default(),
-    );
+    let harness = BeaconChainHarness::builder(MainnetEthSpec)
+        .default_spec()
+        .keypairs(KEYPAIRS[..].to_vec())
+        .fresh_ephemeral_store()
+        .build();
 
     let chain = &harness.chain;
 
@@ -60,15 +55,15 @@ fn produces_attestations() {
         };
 
         let block = chain
-            .block_at_slot(block_slot)
+            .block_at_slot(block_slot, WhenSlotSkipped::Prev)
             .expect("should get block")
             .expect("block should not be skipped");
-        let block_root = block.message.tree_hash_root();
+        let block_root = block.message().tree_hash_root();
 
         let epoch_boundary_slot = state
             .current_epoch()
             .start_slot(MainnetEthSpec::slots_per_epoch());
-        let target_root = if state.slot == epoch_boundary_slot {
+        let target_root = if state.slot() == epoch_boundary_slot {
             block_root
         } else {
             *state
@@ -116,15 +111,35 @@ fn produces_attestations() {
             assert_eq!(data.slot, slot, "bad slot");
             assert_eq!(data.beacon_block_root, block_root, "bad block root");
             assert_eq!(
-                data.source, state.current_justified_checkpoint,
+                data.source,
+                state.current_justified_checkpoint(),
                 "bad source"
             );
             assert_eq!(
-                data.source, state.current_justified_checkpoint,
+                data.source,
+                state.current_justified_checkpoint(),
                 "bad source"
             );
             assert_eq!(data.target.epoch, state.current_epoch(), "bad target epoch");
             assert_eq!(data.target.root, target_root, "bad target root");
+
+            let early_attestation = {
+                let proto_block = chain.fork_choice.read().get_block(&block_root).unwrap();
+                chain
+                    .early_attester_cache
+                    .add_head_block(block_root, block.clone(), proto_block, &state, &chain.spec)
+                    .unwrap();
+                chain
+                    .early_attester_cache
+                    .try_attest(slot, index, &chain.spec)
+                    .unwrap()
+                    .unwrap()
+            };
+
+            assert_eq!(
+                attestation, early_attestation,
+                "early attester cache inconsistent"
+            );
         }
     }
 }

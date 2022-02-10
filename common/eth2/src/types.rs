@@ -2,13 +2,24 @@
 //! required for the HTTP API.
 
 use crate::Error as ServerError;
-use eth2_libp2p::{ConnectionDirection, Enr, Multiaddr, PeerConnectionStatus};
-pub use reqwest::header::ACCEPT;
+use lighthouse_network::{ConnectionDirection, Enr, Multiaddr, PeerConnectionStatus};
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::fmt;
 use std::str::{from_utf8, FromStr};
+use std::time::Duration;
 pub use types::*;
+
+#[cfg(feature = "lighthouse")]
+use crate::lighthouse::BlockReward;
+
+/// An API error serializable to JSON.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Error {
+    Indexed(IndexedErrorMessage),
+    Message(ErrorMessage),
+}
 
 /// An API error serializable to JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,12 +54,36 @@ impl Failure {
     }
 }
 
+/// The version of a single API endpoint, e.g. the `v1` in `/eth/v1/beacon/blocks`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndpointVersion(pub u64);
+
+impl FromStr for EndpointVersion {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(version_str) = s.strip_prefix('v') {
+            u64::from_str(version_str)
+                .map(EndpointVersion)
+                .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl std::fmt::Display for EndpointVersion {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(fmt, "v{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenesisData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub genesis_time: u64,
     pub genesis_validators_root: Hash256,
-    #[serde(with = "serde_utils::bytes_4_hex")]
+    #[serde(with = "eth2_serde_utils::bytes_4_hex")]
     pub genesis_fork_version: [u8; 4],
 }
 
@@ -179,6 +214,13 @@ impl<'a, T: Serialize> From<&'a T> for GenericResponseRef<'a, T> {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ForkVersionedResponse<T> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<ForkName>,
+    pub data: T,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RootData {
     pub root: Hash256,
@@ -230,9 +272,9 @@ impl fmt::Display for ValidatorId {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidatorData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub index: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub balance: u64,
     pub status: ValidatorStatus,
     pub validator: Validator,
@@ -240,9 +282,9 @@ pub struct ValidatorData {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidatorBalanceData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub index: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub balance: u64,
 }
 
@@ -379,24 +421,46 @@ pub struct CommitteesQuery {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct SyncCommitteesQuery {
+    pub epoch: Option<Epoch>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct AttestationPoolQuery {
     pub slot: Option<Slot>,
     pub committee_index: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidatorsQuery {
-    pub id: Option<QueryVec<ValidatorId>>,
-    pub status: Option<QueryVec<ValidatorStatus>>,
+    #[serde(default, deserialize_with = "option_query_vec")]
+    pub id: Option<Vec<ValidatorId>>,
+    #[serde(default, deserialize_with = "option_query_vec")]
+    pub status: Option<Vec<ValidatorStatus>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitteeData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub index: u64,
     pub slot: Slot,
-    #[serde(with = "serde_utils::quoted_u64_vec")]
+    #[serde(with = "eth2_serde_utils::quoted_u64_vec")]
     pub validators: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncCommitteeByValidatorIndices {
+    #[serde(with = "eth2_serde_utils::quoted_u64_vec")]
+    pub validators: Vec<u64>,
+    pub validator_aggregates: Vec<SyncSubcommittee>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SyncSubcommittee {
+    #[serde(with = "eth2_serde_utils::quoted_u64_vec")]
+    pub indices: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -420,7 +484,7 @@ pub struct BlockHeaderData {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DepositContractData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub chain_id: u64,
     pub address: Address,
 }
@@ -442,9 +506,10 @@ pub struct IdentityData {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetaData {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub seq_number: u64,
     pub attnets: String,
+    pub syncnets: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -461,45 +526,93 @@ pub struct SyncingData {
 
 #[derive(Clone, PartialEq, Debug, Deserialize)]
 #[serde(try_from = "String", bound = "T: FromStr")]
-pub struct QueryVec<T: FromStr>(pub Vec<T>);
+pub struct QueryVec<T: FromStr> {
+    values: Vec<T>,
+}
+
+fn query_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromStr,
+{
+    let vec: Vec<QueryVec<T>> = Deserialize::deserialize(deserializer)?;
+    Ok(Vec::from(QueryVec::from(vec)))
+}
+
+fn option_query_vec<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromStr,
+{
+    let vec: Vec<QueryVec<T>> = Deserialize::deserialize(deserializer)?;
+    if vec.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(Vec::from(QueryVec::from(vec))))
+}
+
+impl<T: FromStr> From<Vec<QueryVec<T>>> for QueryVec<T> {
+    fn from(vecs: Vec<QueryVec<T>>) -> Self {
+        Self {
+            values: vecs.into_iter().flat_map(|qv| qv.values).collect(),
+        }
+    }
+}
 
 impl<T: FromStr> TryFrom<String> for QueryVec<T> {
     type Error = String;
 
     fn try_from(string: String) -> Result<Self, Self::Error> {
         if string.is_empty() {
-            return Ok(Self(vec![]));
+            return Ok(Self { values: vec![] });
         }
 
-        string
-            .split(',')
-            .map(|s| s.parse().map_err(|_| "unable to parse".to_string()))
-            .collect::<Result<Vec<T>, String>>()
-            .map(Self)
+        Ok(Self {
+            values: string
+                .split(',')
+                .map(|s| s.parse().map_err(|_| "unable to parse query".to_string()))
+                .collect::<Result<Vec<T>, String>>()?,
+        })
+    }
+}
+
+impl<T: FromStr> From<QueryVec<T>> for Vec<T> {
+    fn from(vec: QueryVec<T>) -> Vec<T> {
+        vec.values
     }
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidatorBalancesQuery {
-    pub id: Option<QueryVec<ValidatorId>>,
+    #[serde(default, deserialize_with = "option_query_vec")]
+    pub id: Option<Vec<ValidatorId>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ValidatorIndexData(#[serde(with = "serde_utils::quoted_u64_vec")] pub Vec<u64>);
+pub struct ValidatorIndexData(#[serde(with = "eth2_serde_utils::quoted_u64_vec")] pub Vec<u64>);
+
+/// Borrowed variant of `ValidatorIndexData`, for serializing/sending.
+#[derive(Clone, Copy, Serialize)]
+#[serde(transparent)]
+pub struct ValidatorIndexDataRef<'a>(
+    #[serde(serialize_with = "eth2_serde_utils::quoted_u64_vec::serialize")] pub &'a [u64],
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttesterData {
     pub pubkey: PublicKeyBytes,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub validator_index: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub committees_at_slot: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub committee_index: CommitteeIndex,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub committee_length: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub validator_committee_index: u64,
     pub slot: Slot,
 }
@@ -507,7 +620,7 @@ pub struct AttesterData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposerData {
     pub pubkey: PublicKeyBytes,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub validator_index: u64,
     pub slot: Slot,
 }
@@ -532,20 +645,23 @@ pub struct ValidatorAggregateAttestationQuery {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BeaconCommitteeSubscription {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub validator_index: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub committee_index: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub committees_at_slot: u64,
     pub slot: Slot,
     pub is_aggregator: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeersQuery {
-    pub state: Option<QueryVec<PeerState>>,
-    pub direction: Option<QueryVec<PeerDirection>>,
+    #[serde(default, deserialize_with = "option_query_vec")]
+    pub state: Option<Vec<PeerState>>,
+    #[serde(default, deserialize_with = "option_query_vec")]
+    pub direction: Option<Vec<PeerDirection>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -654,13 +770,13 @@ impl fmt::Display for PeerDirection {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerCount {
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub connected: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub connecting: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub disconnected: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub disconnecting: u64,
 }
 
@@ -689,14 +805,45 @@ pub struct SseHead {
     pub epoch_transition: bool,
 }
 
+#[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
+pub struct SseChainReorg {
+    pub slot: Slot,
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
+    pub depth: u64,
+    pub old_head_block: Hash256,
+    pub old_head_state: Hash256,
+    pub new_head_block: Hash256,
+    pub new_head_state: Hash256,
+    pub epoch: Epoch,
+}
+
+#[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
+pub struct SseLateHead {
+    pub slot: Slot,
+    pub block: Hash256,
+    pub proposer_index: u64,
+    pub peer_id: Option<String>,
+    pub peer_client: Option<String>,
+    pub proposer_graffiti: String,
+    pub block_delay: Duration,
+    pub observed_delay: Option<Duration>,
+    pub imported_delay: Option<Duration>,
+    pub set_as_head_delay: Option<Duration>,
+}
+
 #[derive(PartialEq, Debug, Serialize, Clone)]
 #[serde(bound = "T: EthSpec", untagged)]
 pub enum EventKind<T: EthSpec> {
-    Attestation(Attestation<T>),
+    Attestation(Box<Attestation<T>>),
     Block(SseBlock),
     FinalizedCheckpoint(SseFinalizedCheckpoint),
     Head(SseHead),
     VoluntaryExit(SignedVoluntaryExit),
+    ChainReorg(SseChainReorg),
+    ContributionAndProof(Box<SignedContributionAndProof<T>>),
+    LateHead(SseLateHead),
+    #[cfg(feature = "lighthouse")]
+    BlockReward(BlockReward),
 }
 
 impl<T: EthSpec> EventKind<T> {
@@ -707,6 +854,11 @@ impl<T: EthSpec> EventKind<T> {
             EventKind::Attestation(_) => "attestation",
             EventKind::VoluntaryExit(_) => "voluntary_exit",
             EventKind::FinalizedCheckpoint(_) => "finalized_checkpoint",
+            EventKind::ChainReorg(_) => "chain_reorg",
+            EventKind::ContributionAndProof(_) => "contribution_and_proof",
+            EventKind::LateHead(_) => "late_head",
+            #[cfg(feature = "lighthouse")]
+            EventKind::BlockReward(_) => "block_reward",
         }
     }
 
@@ -735,6 +887,9 @@ impl<T: EthSpec> EventKind<T> {
             "block" => Ok(EventKind::Block(serde_json::from_str(data).map_err(
                 |e| ServerError::InvalidServerSentEvent(format!("Block: {:?}", e)),
             )?)),
+            "chain_reorg" => Ok(EventKind::ChainReorg(serde_json::from_str(data).map_err(
+                |e| ServerError::InvalidServerSentEvent(format!("Chain Reorg: {:?}", e)),
+            )?)),
             "finalized_checkpoint" => Ok(EventKind::FinalizedCheckpoint(
                 serde_json::from_str(data).map_err(|e| {
                     ServerError::InvalidServerSentEvent(format!("Finalized Checkpoint: {:?}", e))
@@ -743,11 +898,23 @@ impl<T: EthSpec> EventKind<T> {
             "head" => Ok(EventKind::Head(serde_json::from_str(data).map_err(
                 |e| ServerError::InvalidServerSentEvent(format!("Head: {:?}", e)),
             )?)),
+            "late_head" => Ok(EventKind::LateHead(serde_json::from_str(data).map_err(
+                |e| ServerError::InvalidServerSentEvent(format!("Late Head: {:?}", e)),
+            )?)),
             "voluntary_exit" => Ok(EventKind::VoluntaryExit(
                 serde_json::from_str(data).map_err(|e| {
                     ServerError::InvalidServerSentEvent(format!("Voluntary Exit: {:?}", e))
                 })?,
             )),
+            "contribution_and_proof" => Ok(EventKind::ContributionAndProof(Box::new(
+                serde_json::from_str(data).map_err(|e| {
+                    ServerError::InvalidServerSentEvent(format!("Contribution and Proof: {:?}", e))
+                })?,
+            ))),
+            #[cfg(feature = "lighthouse")]
+            "block_reward" => Ok(EventKind::BlockReward(serde_json::from_str(data).map_err(
+                |e| ServerError::InvalidServerSentEvent(format!("Block Reward: {:?}", e)),
+            )?)),
             _ => Err(ServerError::InvalidServerSentEvent(
                 "Could not parse event tag".to_string(),
             )),
@@ -756,8 +923,10 @@ impl<T: EthSpec> EventKind<T> {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventQuery {
-    pub topics: QueryVec<EventTopic>,
+    #[serde(deserialize_with = "query_vec")]
+    pub topics: Vec<EventTopic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -768,6 +937,11 @@ pub enum EventTopic {
     Attestation,
     VoluntaryExit,
     FinalizedCheckpoint,
+    ChainReorg,
+    ContributionAndProof,
+    LateHead,
+    #[cfg(feature = "lighthouse")]
+    BlockReward,
 }
 
 impl FromStr for EventTopic {
@@ -780,6 +954,11 @@ impl FromStr for EventTopic {
             "attestation" => Ok(EventTopic::Attestation),
             "voluntary_exit" => Ok(EventTopic::VoluntaryExit),
             "finalized_checkpoint" => Ok(EventTopic::FinalizedCheckpoint),
+            "chain_reorg" => Ok(EventTopic::ChainReorg),
+            "contribution_and_proof" => Ok(EventTopic::ContributionAndProof),
+            "late_head" => Ok(EventTopic::LateHead),
+            #[cfg(feature = "lighthouse")]
+            "block_reward" => Ok(EventTopic::BlockReward),
             _ => Err("event topic cannot be parsed.".to_string()),
         }
     }
@@ -793,6 +972,11 @@ impl fmt::Display for EventTopic {
             EventTopic::Attestation => write!(f, "attestation"),
             EventTopic::VoluntaryExit => write!(f, "voluntary_exit"),
             EventTopic::FinalizedCheckpoint => write!(f, "finalized_checkpoint"),
+            EventTopic::ChainReorg => write!(f, "chain_reorg"),
+            EventTopic::ContributionAndProof => write!(f, "contribution_and_proof"),
+            EventTopic::LateHead => write!(f, "late_head"),
+            #[cfg(feature = "lighthouse")]
+            EventTopic::BlockReward => write!(f, "block_reward"),
         }
     }
 }
@@ -827,6 +1011,21 @@ impl FromStr for Accept {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LivenessRequestData {
+    pub epoch: Epoch,
+    #[serde(with = "eth2_serde_utils::quoted_u64_vec")]
+    pub indices: Vec<u64>,
+}
+
+#[derive(PartialEq, Debug, Serialize, Deserialize)]
+pub struct LivenessResponseData {
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
+    pub index: u64,
+    pub epoch: Epoch,
+    pub is_live: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,7 +1034,9 @@ mod tests {
     fn query_vec() {
         assert_eq!(
             QueryVec::try_from("0,1,2".to_string()).unwrap(),
-            QueryVec(vec![0_u64, 1, 2])
+            QueryVec {
+                values: vec![0_u64, 1, 2]
+            }
         );
     }
 }

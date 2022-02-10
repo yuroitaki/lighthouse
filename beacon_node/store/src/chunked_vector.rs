@@ -34,8 +34,8 @@ pub enum UpdatePattern {
 /// Map a chunk index to bytes that can be used to key the NoSQL database.
 ///
 /// We shift chunks up by 1 to make room for a genesis chunk that is handled separately.
-pub fn chunk_key(cindex: u64) -> [u8; 8] {
-    (cindex + 1).to_be_bytes()
+pub fn chunk_key(cindex: usize) -> [u8; 8] {
+    (cindex as u64 + 1).to_be_bytes()
 }
 
 /// Return the database key for the genesis value.
@@ -71,6 +71,11 @@ pub trait Field<E: EthSpec>: Copy {
     // TODO: benchmark and optimise this parameter
     fn chunk_size() -> usize {
         128
+    }
+
+    /// Convert a v-index (vector index) to a chunk index.
+    fn chunk_index(vindex: usize) -> usize {
+        vindex / Self::chunk_size()
     }
 
     /// Get the value of this field at the given vector index, from the state.
@@ -145,11 +150,7 @@ pub trait Field<E: EthSpec>: Copy {
 
                 new_chunk.values[i] = vector_value;
             } else {
-                new_chunk.values[i] = existing_chunk
-                    .values
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(Self::Value::default);
+                new_chunk.values[i] = existing_chunk.values.get(i).cloned().unwrap_or_default();
             }
         }
 
@@ -226,12 +227,12 @@ pub trait Field<E: EthSpec>: Copy {
 
     /// Extract the genesis value for a fixed length field from an
     ///
-    /// Will only return a correct value if `slot_needs_genesis_value(state.slot, spec) == true`.
+    /// Will only return a correct value if `slot_needs_genesis_value(state.slot(), spec) == true`.
     fn extract_genesis_value(
         state: &BeaconState<E>,
         spec: &ChainSpec,
     ) -> Result<Self::Value, Error> {
-        let (_, end_vindex) = Self::start_and_end_vindex(state.slot, spec);
+        let (_, end_vindex) = Self::start_and_end_vindex(state.slot(), spec);
         match Self::update_pattern(spec) {
             // Genesis value is guaranteed to exist at `end_vindex`, as it won't yet have been
             // updated
@@ -295,7 +296,7 @@ field!(
     T::SlotsPerHistoricalRoot,
     DBColumn::BeaconBlockRoots,
     |_| OncePerNSlots { n: 1 },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(&state.block_roots, index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(state.block_roots(), index)
 );
 
 field!(
@@ -305,7 +306,7 @@ field!(
     T::SlotsPerHistoricalRoot,
     DBColumn::BeaconStateRoots,
     |_| OncePerNSlots { n: 1 },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(&state.state_roots, index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(state.state_roots(), index)
 );
 
 field!(
@@ -317,7 +318,7 @@ field!(
     |_| OncePerNSlots {
         n: T::SlotsPerHistoricalRoot::to_u64()
     },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(&state.historical_roots, index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(state.historical_roots(), index)
 );
 
 field!(
@@ -327,7 +328,7 @@ field!(
     T::EpochsPerHistoricalVector,
     DBColumn::BeaconRandaoMixes,
     |_| OncePerEpoch { lag: 1 },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(&state.randao_mixes, index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(state.randao_mixes(), index)
 );
 
 pub fn store_updated_vector<F: Field<E>, E: EthSpec, S: KeyValueStore<E>>(
@@ -338,12 +339,12 @@ pub fn store_updated_vector<F: Field<E>, E: EthSpec, S: KeyValueStore<E>>(
     ops: &mut Vec<KeyValueStoreOp>,
 ) -> Result<(), Error> {
     let chunk_size = F::chunk_size();
-    let (start_vindex, end_vindex) = F::start_and_end_vindex(state.slot, spec);
+    let (start_vindex, end_vindex) = F::start_and_end_vindex(state.slot(), spec);
     let start_cindex = start_vindex / chunk_size;
     let end_cindex = end_vindex / chunk_size;
 
     // Store the genesis value if we have access to it, and it hasn't been stored already.
-    if F::slot_needs_genesis_value(state.slot, spec) {
+    if F::slot_needs_genesis_value(state.slot(), spec) {
         let genesis_value = F::extract_genesis_value(state, spec)?;
         F::check_and_store_genesis_value(store, genesis_value, ops)?;
     }
@@ -399,10 +400,10 @@ where
     I: Iterator<Item = usize>,
 {
     for chunk_index in range {
-        let chunk_key = &chunk_key(chunk_index as u64)[..];
+        let chunk_key = &chunk_key(chunk_index)[..];
 
         let existing_chunk =
-            Chunk::<F::Value>::load(store, F::column(), chunk_key)?.unwrap_or_else(Chunk::default);
+            Chunk::<F::Value>::load(store, F::column(), chunk_key)?.unwrap_or_default();
 
         let new_chunk = F::get_updated_chunk(
             &existing_chunk,
@@ -431,10 +432,16 @@ fn range_query<S: KeyValueStore<E>, E: EthSpec, T: Decode + Encode>(
     start_index: usize,
     end_index: usize,
 ) -> Result<Vec<Chunk<T>>, Error> {
-    let mut result = vec![];
+    let range = start_index..=end_index;
+    let len = range
+        .end()
+        // Add one to account for inclusive range.
+        .saturating_add(1)
+        .saturating_sub(*range.start());
+    let mut result = Vec::with_capacity(len);
 
-    for chunk_index in start_index..=end_index {
-        let key = &chunk_key(chunk_index as u64)[..];
+    for chunk_index in range {
+        let key = &chunk_key(chunk_index)[..];
         let chunk = Chunk::load(store, column, key)?.ok_or(ChunkError::Missing { chunk_index })?;
         result.push(chunk);
     }

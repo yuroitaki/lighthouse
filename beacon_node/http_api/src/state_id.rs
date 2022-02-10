@@ -8,10 +8,6 @@ use types::{BeaconState, EthSpec, Fork, Hash256, Slot};
 pub struct StateId(CoreStateId);
 
 impl StateId {
-    pub fn head() -> Self {
-        Self(CoreStateId::Head)
-    }
-
     pub fn slot(slot: Slot) -> Self {
         Self(CoreStateId::Slot(slot))
     }
@@ -57,7 +53,7 @@ impl StateId {
         &self,
         chain: &BeaconChain<T>,
     ) -> Result<Fork, warp::Rejection> {
-        self.map_state(chain, |state| Ok(state.fork))
+        self.map_state(chain, |state| Ok(state.fork()))
     }
 
     /// Return the `BeaconState` identified by `self`.

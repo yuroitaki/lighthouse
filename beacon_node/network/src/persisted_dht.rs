@@ -1,4 +1,4 @@
-use eth2_libp2p::Enr;
+use lighthouse_network::Enr;
 use std::sync::Arc;
 use store::{DBColumn, Error as StoreError, HotColdDB, ItemStore, StoreItem};
 use types::{EthSpec, Hash256};
@@ -27,6 +27,13 @@ pub fn persist_dht<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     store.put_item(&DHT_DB_KEY, &PersistedDht { enrs })
 }
 
+/// Attempts to clear any DHT entries.
+pub fn clear_dht<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    store: Arc<HotColdDB<E, Hot, Cold>>,
+) -> Result<(), store::Error> {
+    store.hot_db.delete::<PersistedDht>(&DHT_DB_KEY)
+}
+
 /// Wrapper around DHT for persistence to disk.
 pub struct PersistedDht {
     pub enrs: Vec<Enr>,
@@ -53,7 +60,7 @@ impl StoreItem for PersistedDht {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eth2_libp2p::Enr;
+    use lighthouse_network::Enr;
     use sloggers::{null::NullLoggerBuilder, Build};
     use std::str::FromStr;
     use store::config::StoreConfig;

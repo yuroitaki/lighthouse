@@ -2,10 +2,10 @@ use crate::{Error as DirError, ValidatorDir};
 use bls::get_withdrawal_credentials;
 use deposit_contract::{encode_eth1_tx_data, Error as DepositError};
 use eth2_keystore::{Error as KeystoreError, Keystore, KeystoreBuilder, PlainText};
+use filesystem::create_with_600_perms;
 use rand::{distributions::Alphanumeric, Rng};
-use std::fs::{create_dir_all, File, OpenOptions};
+use std::fs::{create_dir_all, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use types::{ChainSpec, DepositData, Hash256, Keypair, Signature};
 
@@ -33,7 +33,7 @@ pub enum Error {
     KeystoreAlreadyExists(PathBuf),
     UnableToSaveKeystore(io::Error),
     PasswordAlreadyExists(PathBuf),
-    UnableToSavePassword(io::Error),
+    UnableToSavePassword(filesystem::Error),
     KeystoreError(KeystoreError),
     UnableToOpenDir(DirError),
     UninitializedVotingKeystore,
@@ -134,15 +134,18 @@ impl<'a> Builder<'a> {
         self
     }
 
+    /// Return the path to the validator dir to be built, i.e. `base_dir/pubkey`.
+    pub fn get_dir_path(base_validators_dir: &Path, voting_keystore: &Keystore) -> PathBuf {
+        base_validators_dir.join(format!("0x{}", voting_keystore.pubkey()))
+    }
+
     /// Consumes `self`, returning a `ValidatorDir` if no error is encountered.
     pub fn build(self) -> Result<ValidatorDir, Error> {
         let (voting_keystore, voting_password) = self
             .voting_keystore
             .ok_or(Error::UninitializedVotingKeystore)?;
 
-        let dir = self
-            .base_validators_dir
-            .join(format!("0x{}", voting_keystore.pubkey()));
+        let dir = Self::get_dir_path(&self.base_validators_dir, &voting_keystore);
 
         if dir.exists() {
             return Err(Error::DirectoryAlreadyExists(dir));
@@ -180,7 +183,7 @@ impl<'a> Builder<'a> {
                     signature: Signature::empty().into(),
                 };
 
-                deposit_data.signature = deposit_data.create_signature(&voting_keypair.sk, &spec);
+                deposit_data.signature = deposit_data.create_signature(&voting_keypair.sk, spec);
 
                 let deposit_data =
                     encode_eth1_tx_data(&deposit_data).map_err(Error::UnableToEncodeDeposit)?;
@@ -231,7 +234,7 @@ impl<'a> Builder<'a> {
                 if self.store_withdrawal_keystore {
                     // Write the withdrawal password to file.
                     write_password_to_file(
-                        password_dir.join(withdrawal_keypair.pk.to_hex_string()),
+                        password_dir.join(withdrawal_keypair.pk.as_hex_string()),
                         withdrawal_password.as_bytes(),
                     )?;
 
@@ -283,19 +286,7 @@ pub fn write_password_to_file<P: AsRef<Path>>(path: P, bytes: &[u8]) -> Result<(
         return Err(Error::PasswordAlreadyExists(path.into()));
     }
 
-    let mut file = File::create(&path).map_err(Error::UnableToSavePassword)?;
-
-    let mut perm = file
-        .metadata()
-        .map_err(Error::UnableToSavePassword)?
-        .permissions();
-
-    perm.set_mode(0o600);
-
-    file.set_permissions(perm)
-        .map_err(Error::UnableToSavePassword)?;
-
-    file.write_all(bytes).map_err(Error::UnableToSavePassword)?;
+    create_with_600_perms(path, bytes).map_err(Error::UnableToSavePassword)?;
 
     Ok(())
 }
@@ -306,6 +297,7 @@ fn random_keystore() -> Result<(Keystore, PlainText), Error> {
     let password: PlainText = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(DEFAULT_PASSWORD_LEN)
+        .map(char::from)
         .collect::<String>()
         .into_bytes()
         .into();

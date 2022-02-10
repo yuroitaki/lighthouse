@@ -1,5 +1,6 @@
 use crate::tree_hash::vec_tree_hash_root;
 use crate::Error;
+use derivative::Derivative;
 use serde_derive::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
@@ -46,7 +47,8 @@ pub use typenum;
 /// // Push a value to if it _does_ exceed the maximum.
 /// assert!(long.push(6).is_err());
 /// ```
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Derivative)]
+#[derivative(PartialEq, Eq, Hash(bound = "T: std::hash::Hash"))]
 #[serde(transparent)]
 pub struct VariableList<T, N> {
     vec: Vec<T>,
@@ -120,9 +122,9 @@ impl<T, N: Unsigned> From<Vec<T>> for VariableList<T, N> {
     }
 }
 
-impl<T, N: Unsigned> Into<Vec<T>> for VariableList<T, N> {
-    fn into(self) -> Vec<T> {
-        self.vec
+impl<T, N: Unsigned> From<VariableList<T, N>> for Vec<T> {
+    fn from(list: VariableList<T, N>) -> Vec<T> {
+        list.vec
     }
 }
 
@@ -259,8 +261,10 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<T: arbitrary::Arbitrary, N: 'static + Unsigned> arbitrary::Arbitrary for VariableList<T, N> {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+impl<'a, T: arbitrary::Arbitrary<'a>, N: 'static + Unsigned> arbitrary::Arbitrary<'a>
+    for VariableList<T, N>
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let max_size = N::to_usize();
         let rand = usize::arbitrary(u)?;
         let size = std::cmp::min(rand, max_size);
@@ -345,7 +349,7 @@ mod test {
     fn round_trip<T: Encode + Decode + std::fmt::Debug + PartialEq>(item: T) {
         let encoded = &item.as_ssz_bytes();
         assert_eq!(item.ssz_bytes_len(), encoded.len());
-        assert_eq!(T::from_ssz_bytes(&encoded), Ok(item));
+        assert_eq!(T::from_ssz_bytes(encoded), Ok(item));
     }
 
     #[test]

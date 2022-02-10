@@ -5,11 +5,11 @@ use eth1::{Config, Service};
 use eth1::{DepositCache, DEFAULT_CHAIN_ID, DEFAULT_NETWORK_ID};
 use eth1_test_rig::GanacheEth1Instance;
 use merkle_proof::verify_merkle_proof;
+use sensitive_url::SensitiveUrl;
 use slog::Logger;
 use sloggers::{null::NullLoggerBuilder, Build};
 use std::ops::Range;
 use std::time::Duration;
-use tokio_compat_02::FutureExt;
 use tree_hash::TreeHash;
 use types::{DepositData, EthSpec, Hash256, Keypair, MainnetEthSpec, MinimalEthSpec, Signature};
 use web3::{transports::Http, Web3};
@@ -53,7 +53,7 @@ fn random_deposit_data() -> DepositData {
 /// Blocking operation to get the deposit logs from the `deposit_contract`.
 async fn blocking_deposit_logs(eth1: &GanacheEth1Instance, range: Range<u64>) -> Vec<Log> {
     get_deposit_logs_in_range(
-        &eth1.endpoint(),
+        &SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap(),
         &eth1.deposit_contract.address(),
         range,
         timeout(),
@@ -65,7 +65,7 @@ async fn blocking_deposit_logs(eth1: &GanacheEth1Instance, range: Range<u64>) ->
 /// Blocking operation to get the deposit root from the `deposit_contract`.
 async fn blocking_deposit_root(eth1: &GanacheEth1Instance, block_number: u64) -> Option<Hash256> {
     get_deposit_root(
-        &eth1.endpoint(),
+        &SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap(),
         &eth1.deposit_contract.address(),
         block_number,
         timeout(),
@@ -77,7 +77,7 @@ async fn blocking_deposit_root(eth1: &GanacheEth1Instance, block_number: u64) ->
 /// Blocking operation to get the deposit count from the `deposit_contract`.
 async fn blocking_deposit_count(eth1: &GanacheEth1Instance, block_number: u64) -> Option<u64> {
     get_deposit_count(
-        &eth1.endpoint(),
+        &SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap(),
         &eth1.deposit_contract.address(),
         block_number,
         timeout(),
@@ -89,7 +89,6 @@ async fn blocking_deposit_count(eth1: &GanacheEth1Instance, block_number: u64) -
 async fn get_block_number(web3: &Web3<Http>) -> u64 {
     web3.eth()
         .block_number()
-        .compat()
         .await
         .map(|v| v.as_u64())
         .expect("should get block number")
@@ -119,7 +118,7 @@ mod eth1_cache {
 
                 let service = Service::new(
                     Config {
-                        endpoints: vec![eth1.endpoint()],
+                        endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                         deposit_contract_address: deposit_contract.address(),
                         lowest_cached_block_number: initial_block_number,
                         follow_distance,
@@ -179,7 +178,6 @@ mod eth1_cache {
                 }
             }
         }
-        .compat()
         .await;
     }
 
@@ -200,7 +198,7 @@ mod eth1_cache {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: get_block_number(&web3).await,
                     follow_distance: 0,
@@ -234,7 +232,6 @@ mod eth1_cache {
                 "should not grow cache beyond target"
             );
         }
-        .compat()
         .await;
     }
 
@@ -255,7 +252,7 @@ mod eth1_cache {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: get_block_number(&web3).await,
                     follow_distance: 0,
@@ -287,7 +284,6 @@ mod eth1_cache {
                 "should not grow cache beyond target"
             );
         }
-        .compat()
         .await;
     }
 
@@ -306,7 +302,7 @@ mod eth1_cache {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: get_block_number(&web3).await,
                     follow_distance: 0,
@@ -334,7 +330,6 @@ mod eth1_cache {
 
             assert!(service.block_cache_len() >= n, "should grow the cache");
         }
-        .compat()
         .await;
     }
 }
@@ -359,7 +354,7 @@ mod deposit_tree {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     deposit_contract_deploy_block: start_block,
                     follow_distance: 0,
@@ -419,7 +414,6 @@ mod deposit_tree {
                 );
             }
         }
-        .compat()
         .await;
     }
 
@@ -440,7 +434,7 @@ mod deposit_tree {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     deposit_contract_deploy_block: start_block,
                     lowest_cached_block_number: start_block,
@@ -469,7 +463,6 @@ mod deposit_tree {
 
             assert_eq!(service.deposit_cache_len(), n);
         }
-        .compat()
         .await;
     }
 
@@ -570,7 +563,6 @@ mod deposit_tree {
                 }
             }
         }
-        .compat()
         .await;
     }
 }
@@ -582,7 +574,7 @@ mod http {
 
     async fn get_block(eth1: &GanacheEth1Instance, block_number: u64) -> Block {
         eth1::http::get_block(
-            &eth1.endpoint(),
+            &SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap(),
             BlockQuery::Number(block_number),
             timeout(),
         )
@@ -674,7 +666,6 @@ mod http {
                 );
             }
         }
-        .compat()
         .await;
     }
 }
@@ -698,7 +689,7 @@ mod fast {
             let now = get_block_number(&web3).await;
             let service = Service::new(
                 Config {
-                    endpoints: vec![eth1.endpoint()],
+                    endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                     deposit_contract_address: deposit_contract.address(),
                     deposit_contract_deploy_block: now,
                     lowest_cached_block_number: now,
@@ -755,7 +746,6 @@ mod fast {
                 );
             }
         }
-        .compat()
         .await;
     }
 }
@@ -775,7 +765,7 @@ mod persist {
 
             let now = get_block_number(&web3).await;
             let config = Config {
-                endpoints: vec![eth1.endpoint()],
+                endpoints: vec![SensitiveUrl::parse(eth1.endpoint().as_str()).unwrap()],
                 deposit_contract_address: deposit_contract.address(),
                 deposit_contract_deploy_block: now,
                 lowest_cached_block_number: now,
@@ -837,7 +827,6 @@ mod persist {
                 "Should have equal cached deposits as before recovery"
             );
         }
-        .compat()
         .await;
     }
 }
@@ -885,7 +874,10 @@ mod fallbacks {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![endpoint1.endpoint(), endpoint2.endpoint()],
+                    endpoints: vec![
+                        SensitiveUrl::parse(endpoint1.endpoint().as_str()).unwrap(),
+                        SensitiveUrl::parse(endpoint2.endpoint().as_str()).unwrap(),
+                    ],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: initial_block_number,
                     follow_distance: 0,
@@ -914,7 +906,6 @@ mod fallbacks {
                 endpoint2_block_number
             );
         }
-        .compat()
         .await;
     }
 
@@ -961,7 +952,10 @@ mod fallbacks {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![endpoint2.endpoint(), endpoint1.endpoint()],
+                    endpoints: vec![
+                        SensitiveUrl::parse(endpoint2.endpoint().as_str()).unwrap(),
+                        SensitiveUrl::parse(endpoint1.endpoint().as_str()).unwrap(),
+                    ],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: initial_block_number,
                     follow_distance: 0,
@@ -981,7 +975,6 @@ mod fallbacks {
                 endpoint2_block_number
             );
         }
-        .compat()
         .await;
     }
 
@@ -1028,7 +1021,10 @@ mod fallbacks {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![endpoint2.endpoint(), endpoint1.endpoint()],
+                    endpoints: vec![
+                        SensitiveUrl::parse(endpoint2.endpoint().as_str()).unwrap(),
+                        SensitiveUrl::parse(endpoint1.endpoint().as_str()).unwrap(),
+                    ],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: initial_block_number,
                     follow_distance: 0,
@@ -1048,7 +1044,6 @@ mod fallbacks {
                 endpoint2_block_number
             );
         }
-        .compat()
         .await;
     }
 
@@ -1081,7 +1076,10 @@ mod fallbacks {
 
             let service = Service::new(
                 Config {
-                    endpoints: vec![endpoint1.endpoint(), endpoint2.endpoint()],
+                    endpoints: vec![
+                        SensitiveUrl::parse(endpoint1.endpoint().as_str()).unwrap(),
+                        SensitiveUrl::parse(endpoint2.endpoint().as_str()).unwrap(),
+                    ],
                     deposit_contract_address: deposit_contract.address(),
                     lowest_cached_block_number: initial_block_number,
                     follow_distance: 0,
@@ -1123,7 +1121,6 @@ mod fallbacks {
                 endpoint2_block_number
             );
         }
-        .compat()
         .await;
     }
 }

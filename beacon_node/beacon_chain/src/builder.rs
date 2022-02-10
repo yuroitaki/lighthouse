@@ -1,5 +1,6 @@
 use crate::beacon_chain::{BEACON_CHAIN_DB_KEY, ETH1_CACHE_DB_KEY, OP_POOL_DB_KEY};
 use crate::eth1_chain::{CachingEth1Backend, SszEth1};
+use crate::fork_revert::{reset_fork_choice_to_finalization, revert_to_fork_boundary};
 use crate::head_tracker::HeadTracker;
 use crate::migrate::{BackgroundMigrator, MigratorConfig};
 use crate::persisted_beacon_chain::PersistedBeaconChain;
@@ -14,21 +15,22 @@ use crate::{
     Eth1ChainBackend, ServerSentEventHandler,
 };
 use eth1::Config as Eth1Config;
+use execution_layer::ExecutionLayer;
 use fork_choice::ForkChoice;
 use futures::channel::mpsc::Sender;
 use operation_pool::{OperationPool, PersistedOperationPool};
 use parking_lot::RwLock;
 use slasher::Slasher;
-use slog::{crit, info, Logger};
+use slog::{crit, error, info, Logger};
 use slot_clock::{SlotClock, TestingSlotClock};
 use std::marker::PhantomData;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use store::{HotColdDB, ItemStore};
+use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
+use task_executor::ShutdownReason;
 use types::{
-    BeaconBlock, BeaconState, ChainSpec, EthSpec, Graffiti, Hash256, PublicKeyBytes, Signature,
-    SignedBeaconBlock, Slot,
+    BeaconBlock, BeaconState, ChainSpec, Checkpoint, EthSpec, Graffiti, Hash256, PublicKeyBytes,
+    Signature, SignedBeaconBlock, Slot,
 };
 
 /// An empty struct used to "witness" all the `BeaconChainTypes` traits. It has no user-facing
@@ -74,19 +76,21 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     >,
     op_pool: Option<OperationPool<T::EthSpec>>,
     eth1_chain: Option<Eth1Chain<T::Eth1Chain, T::EthSpec>>,
+    execution_layer: Option<ExecutionLayer>,
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
-    shutdown_sender: Option<Sender<&'static str>>,
+    shutdown_sender: Option<Sender<ShutdownReason>>,
     head_tracker: Option<HeadTracker>,
-    data_dir: Option<PathBuf>,
     validator_pubkey_cache: Option<ValidatorPubkeyCache<T>>,
     spec: ChainSpec,
     chain_config: ChainConfig,
-    disabled_forks: Vec<String>,
     log: Option<Logger>,
     graffiti: Graffiti,
     slasher: Option<Arc<Slasher<T::EthSpec>>>,
     validator_monitor: Option<ValidatorMonitor<T::EthSpec>>,
+    // Pending I/O batch that is constructed during building and should be executed atomically
+    // alongside `PersistedBeaconChain` storage when `BeaconChainBuilder::build` is called.
+    pending_io_batch: Vec<KeyValueStoreOp>,
 }
 
 impl<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>
@@ -112,12 +116,11 @@ where
             fork_choice: None,
             op_pool: None,
             eth1_chain: None,
+            execution_layer: None,
             event_handler: None,
             slot_clock: None,
             shutdown_sender: None,
             head_tracker: None,
-            data_dir: None,
-            disabled_forks: Vec::new(),
             validator_pubkey_cache: None,
             spec: TEthSpec::default_spec(),
             chain_config: ChainConfig::default(),
@@ -125,6 +128,7 @@ where
             graffiti: Graffiti::default(),
             slasher: None,
             validator_monitor: None,
+            pending_io_batch: vec![],
         }
     }
 
@@ -135,6 +139,11 @@ where
     pub fn custom_spec(mut self, spec: ChainSpec) -> Self {
         self.spec = spec;
         self
+    }
+
+    /// Get a reference to the builder's spec.
+    pub fn get_spec(&self) -> &ChainSpec {
+        &self.spec
     }
 
     /// Sets the maximum number of blocks that will be skipped when processing
@@ -173,21 +182,6 @@ where
         self.log = Some(log);
         self
     }
-
-    /// Sets the location to the pubkey cache file.
-    ///
-    /// Should generally be called early in the build chain.
-    pub fn data_dir(mut self, path: PathBuf) -> Self {
-        self.data_dir = Some(path);
-        self
-    }
-
-    /// Sets a list of hard-coded forks that will not be activated.
-    pub fn disabled_forks(mut self, disabled_forks: Vec<String>) -> Self {
-        self.disabled_forks = disabled_forks;
-        self
-    }
-
     /// Attempt to load an existing eth1 cache from the builder's `Store`.
     pub fn get_persisted_eth1_backend(&self) -> Result<Option<SszEth1>, String> {
         let store = self
@@ -246,21 +240,28 @@ where
             .ok_or("Fork choice not found in store")?;
 
         let genesis_block = store
-            .get_item::<SignedBeaconBlock<TEthSpec>>(&chain.genesis_block_root)
-            .map_err(|e| format!("DB error when reading genesis block: {:?}", e))?
+            .get_block(&chain.genesis_block_root)
+            .map_err(|e| descriptive_db_error("genesis block", &e))?
             .ok_or("Genesis block not found in store")?;
         let genesis_state = store
             .get_state(&genesis_block.state_root(), Some(genesis_block.slot()))
-            .map_err(|e| format!("DB error when reading genesis state: {:?}", e))?
+            .map_err(|e| descriptive_db_error("genesis state", &e))?
             .ok_or("Genesis block not found in store")?;
 
-        self.genesis_time = Some(genesis_state.genesis_time);
+        self.genesis_time = Some(genesis_state.genesis_time());
 
         self.op_pool = Some(
             store
                 .get_item::<PersistedOperationPool<TEthSpec>>(&OP_POOL_DB_KEY)
                 .map_err(|e| format!("DB error whilst reading persisted op pool: {:?}", e))?
                 .map(PersistedOperationPool::into_operation_pool)
+                .transpose()
+                .map_err(|e| {
+                    format!(
+                        "Error while creating the op pool from the persisted op pool: {:?}",
+                        e
+                    )
+                })?
                 .unwrap_or_else(OperationPool::new),
         );
 
@@ -279,12 +280,19 @@ where
         Ok(self)
     }
 
-    /// Starts a new chain from a genesis state.
-    pub fn genesis_state(
+    /// Store the genesis state & block in the DB.
+    ///
+    /// Do *not* initialize fork choice, or do anything that assumes starting from genesis.
+    ///
+    /// Return the `BeaconSnapshot` representing genesis as well as the mutated builder.
+    fn set_genesis_state(
         mut self,
         mut beacon_state: BeaconState<TEthSpec>,
-    ) -> Result<Self, String> {
-        let store = self.store.clone().ok_or("genesis_state requires a store")?;
+    ) -> Result<(BeaconSnapshot<TEthSpec>, Self), String> {
+        let store = self
+            .store
+            .clone()
+            .ok_or("set_genesis_state requires a store")?;
 
         let beacon_block = genesis_block(&mut beacon_state, &self.spec)?;
 
@@ -292,22 +300,19 @@ where
             .build_all_caches(&self.spec)
             .map_err(|e| format!("Failed to build genesis state caches: {:?}", e))?;
 
-        let beacon_state_root = beacon_block.message.state_root;
+        let beacon_state_root = beacon_block.message().state_root();
         let beacon_block_root = beacon_block.canonical_root();
-
-        self.genesis_state_root = Some(beacon_state_root);
-        self.genesis_block_root = Some(beacon_block_root);
 
         store
             .put_state(&beacon_state_root, &beacon_state)
             .map_err(|e| format!("Failed to store genesis state: {:?}", e))?;
         store
-            .put_item(&beacon_block_root, &beacon_block)
+            .put_block(&beacon_block_root, beacon_block.clone())
             .map_err(|e| format!("Failed to store genesis block: {:?}", e))?;
 
         // Store the genesis block under the `ZERO_HASH` key.
         store
-            .put_item(&Hash256::zero(), &beacon_block)
+            .put_block(&Hash256::zero(), beacon_block.clone())
             .map_err(|e| {
                 format!(
                     "Failed to store genesis block under 0x00..00 alias: {:?}",
@@ -315,24 +320,146 @@ where
                 )
             })?;
 
-        let genesis = BeaconSnapshot {
-            beacon_block_root,
-            beacon_block,
-            beacon_state,
-        };
+        self.genesis_state_root = Some(beacon_state_root);
+        self.genesis_block_root = Some(beacon_block_root);
+        self.genesis_time = Some(beacon_state.genesis_time());
+
+        Ok((
+            BeaconSnapshot {
+                beacon_block_root,
+                beacon_block,
+                beacon_state,
+            },
+            self,
+        ))
+    }
+
+    /// Starts a new chain from a genesis state.
+    pub fn genesis_state(mut self, beacon_state: BeaconState<TEthSpec>) -> Result<Self, String> {
+        let store = self.store.clone().ok_or("genesis_state requires a store")?;
+
+        let (genesis, updated_builder) = self.set_genesis_state(beacon_state)?;
+        self = updated_builder;
 
         let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, &genesis);
 
-        let fork_choice = ForkChoice::from_genesis(
+        let fork_choice = ForkChoice::from_anchor(
             fc_store,
             genesis.beacon_block_root,
-            &genesis.beacon_block.message,
+            &genesis.beacon_block,
             &genesis.beacon_state,
         )
-        .map_err(|e| format!("Unable to build initialize ForkChoice: {:?}", e))?;
+        .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
 
         self.fork_choice = Some(fork_choice);
-        self.genesis_time = Some(genesis.beacon_state.genesis_time);
+
+        Ok(self.empty_op_pool())
+    }
+
+    /// Start the chain from a weak subjectivity state.
+    pub fn weak_subjectivity_state(
+        mut self,
+        mut weak_subj_state: BeaconState<TEthSpec>,
+        weak_subj_block: SignedBeaconBlock<TEthSpec>,
+        genesis_state: BeaconState<TEthSpec>,
+    ) -> Result<Self, String> {
+        let store = self.store.clone().ok_or("genesis_state requires a store")?;
+
+        let weak_subj_slot = weak_subj_state.slot();
+        let weak_subj_block_root = weak_subj_block.canonical_root();
+        let weak_subj_state_root = weak_subj_block.state_root();
+
+        // Check that the given block lies on an epoch boundary. Due to the database only storing
+        // full states on epoch boundaries and at restore points it would be difficult to support
+        // starting from a mid-epoch state.
+        if weak_subj_slot % TEthSpec::slots_per_epoch() != 0 {
+            return Err(format!(
+                "Checkpoint block at slot {} is not aligned to epoch start. \
+                 Please supply an aligned checkpoint with block.slot % 32 == 0",
+                weak_subj_block.slot(),
+            ));
+        }
+
+        // Check that the block and state have consistent slots and state roots.
+        if weak_subj_state.slot() != weak_subj_block.slot() {
+            return Err(format!(
+                "Slot of snapshot block ({}) does not match snapshot state ({})",
+                weak_subj_block.slot(),
+                weak_subj_state.slot(),
+            ));
+        }
+
+        let computed_state_root = weak_subj_state
+            .update_tree_hash_cache()
+            .map_err(|e| format!("Error computing checkpoint state root: {:?}", e))?;
+
+        if weak_subj_state_root != computed_state_root {
+            return Err(format!(
+                "Snapshot state root does not match block, expected: {:?}, got: {:?}",
+                weak_subj_state_root, computed_state_root
+            ));
+        }
+
+        // Check that the checkpoint state is for the same network as the genesis state.
+        // This check doesn't do much for security but should prevent mistakes.
+        if weak_subj_state.genesis_validators_root() != genesis_state.genesis_validators_root() {
+            return Err(format!(
+                "Snapshot state appears to be from the wrong network. Genesis validators root \
+                 is {:?} but should be {:?}",
+                weak_subj_state.genesis_validators_root(),
+                genesis_state.genesis_validators_root()
+            ));
+        }
+
+        // Set the store's split point *before* storing genesis so that genesis is stored
+        // immediately in the freezer DB.
+        store.set_split(weak_subj_slot, weak_subj_state_root);
+        let (_, updated_builder) = self.set_genesis_state(genesis_state)?;
+        self = updated_builder;
+
+        // Write the state and block non-atomically, it doesn't matter if they're forgotten
+        // about on a crash restart.
+        store
+            .put_state(&weak_subj_state_root, &weak_subj_state)
+            .map_err(|e| format!("Failed to store weak subjectivity state: {:?}", e))?;
+        store
+            .put_block(&weak_subj_block_root, weak_subj_block.clone())
+            .map_err(|e| format!("Failed to store weak subjectivity block: {:?}", e))?;
+
+        // Stage the database's metadata fields for atomic storage when `build` is called.
+        // This prevents the database from restarting in an inconsistent state if the anchor
+        // info or split point is written before the `PersistedBeaconChain`.
+        self.pending_io_batch.push(store.store_split_in_batch());
+        self.pending_io_batch.push(
+            store
+                .init_anchor_info(weak_subj_block.message())
+                .map_err(|e| format!("Failed to initialize anchor info: {:?}", e))?,
+        );
+
+        // Store pruning checkpoint to prevent attempting to prune before the anchor state.
+        self.pending_io_batch
+            .push(store.pruning_checkpoint_store_op(Checkpoint {
+                root: weak_subj_block_root,
+                epoch: weak_subj_state.slot().epoch(TEthSpec::slots_per_epoch()),
+            }));
+
+        let snapshot = BeaconSnapshot {
+            beacon_block_root: weak_subj_block_root,
+            beacon_block: weak_subj_block,
+            beacon_state: weak_subj_state,
+        };
+
+        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, &snapshot);
+
+        let fork_choice = ForkChoice::from_anchor(
+            fc_store,
+            snapshot.beacon_block_root,
+            &snapshot.beacon_block,
+            &snapshot.beacon_state,
+        )
+        .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
+
+        self.fork_choice = Some(fork_choice);
 
         Ok(self.empty_op_pool())
     }
@@ -340,6 +467,12 @@ where
     /// Sets the `BeaconChain` eth1 backend.
     pub fn eth1_backend(mut self, backend: Option<TEth1Backend>) -> Self {
         self.eth1_chain = backend.map(Eth1Chain::new);
+        self
+    }
+
+    /// Sets the `BeaconChain` execution layer.
+    pub fn execution_layer(mut self, execution_layer: Option<ExecutionLayer>) -> Self {
+        self.execution_layer = execution_layer;
         self
     }
 
@@ -359,8 +492,15 @@ where
         self
     }
 
+    /// Fetch a reference to the slot clock.
+    ///
+    /// Can be used for mutation during testing due to `SlotClock`'s internal mutability.
+    pub fn get_slot_clock(&self) -> Option<&TSlotClock> {
+        self.slot_clock.as_ref()
+    }
+
     /// Sets a `Sender` to allow the beacon chain to send shutdown signals.
-    pub fn shutdown_sender(mut self, sender: Sender<&'static str>) -> Self {
+    pub fn shutdown_sender(mut self, sender: Sender<ShutdownReason>) -> Self {
         self.shutdown_sender = Some(sender);
         self
     }
@@ -408,7 +548,7 @@ where
     /// configured.
     #[allow(clippy::type_complexity)] // I think there's nothing to be gained here from a type alias.
     pub fn build(
-        self,
+        mut self,
     ) -> Result<
         BeaconChain<Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>>,
         String,
@@ -430,6 +570,7 @@ where
         let mut validator_monitor = self
             .validator_monitor
             .ok_or("Cannot build without a validator monitor")?;
+        let head_tracker = Arc::new(self.head_tracker.unwrap_or_default());
 
         let current_slot = if slot_clock
             .is_prior_to_genesis()
@@ -440,19 +581,56 @@ where
             slot_clock.now().ok_or("Unable to read slot")?
         };
 
-        let head_block_root = fork_choice
-            .get_head(current_slot)
+        let initial_head_block_root = fork_choice
+            .get_head(current_slot, &self.spec)
             .map_err(|e| format!("Unable to get fork choice head: {:?}", e))?;
 
-        let head_block = store
-            .get_item::<SignedBeaconBlock<TEthSpec>>(&head_block_root)
-            .map_err(|e| format!("DB error when reading head block: {:?}", e))?
-            .ok_or("Head block not found in store")?;
+        // Try to decode the head block according to the current fork, if that fails, try
+        // to backtrack to before the most recent fork.
+        let (head_block_root, head_block, head_reverted) =
+            match store.get_block(&initial_head_block_root) {
+                Ok(Some(block)) => (initial_head_block_root, block, false),
+                Ok(None) => return Err("Head block not found in store".into()),
+                Err(StoreError::SszDecodeError(_)) => {
+                    error!(
+                        log,
+                        "Error decoding head block";
+                        "message" => "This node has likely missed a hard fork. \
+                                      It will try to revert the invalid blocks and keep running, \
+                                      but any stray blocks and states will not be deleted. \
+                                      Long-term you should consider re-syncing this node."
+                    );
+                    let (block_root, block) = revert_to_fork_boundary(
+                        current_slot,
+                        initial_head_block_root,
+                        store.clone(),
+                        &self.spec,
+                        &log,
+                    )?;
+
+                    // Update head tracker.
+                    head_tracker.register_block(block_root, block.parent_root(), block.slot());
+                    (block_root, block, true)
+                }
+                Err(e) => return Err(descriptive_db_error("head block", &e)),
+            };
+
         let head_state_root = head_block.state_root();
         let head_state = store
             .get_state(&head_state_root, Some(head_block.slot()))
-            .map_err(|e| format!("DB error when reading head state: {:?}", e))?
+            .map_err(|e| descriptive_db_error("head state", &e))?
             .ok_or("Head state not found in store")?;
+
+        // If the head reverted then we need to reset fork choice using the new head's finalized
+        // checkpoint.
+        if head_reverted {
+            fork_choice = reset_fork_choice_to_finalization(
+                head_block_root,
+                &head_state,
+                store.clone(),
+                &self.spec,
+            )?;
+        }
 
         let mut canonical_head = BeaconSnapshot {
             beacon_block_root: head_block_root,
@@ -470,14 +648,15 @@ where
         //
         // This is a sanity check to detect database corruption.
         let fc_finalized = fork_choice.finalized_checkpoint();
-        let head_finalized = canonical_head.beacon_state.finalized_checkpoint;
+        let head_finalized = canonical_head.beacon_state.finalized_checkpoint();
         if fc_finalized != head_finalized {
-            if head_finalized.root == Hash256::zero()
+            let is_genesis = head_finalized.root.is_zero()
                 && head_finalized.epoch == fc_finalized.epoch
-                && fc_finalized.root == genesis_block_root
-            {
-                // This is a legal edge-case encountered during genesis.
-            } else {
+                && fc_finalized.root == genesis_block_root;
+            let is_wss = store.get_anchor_slot().map_or(false, |anchor_slot| {
+                fc_finalized.epoch == anchor_slot.epoch(TEthSpec::slots_per_epoch())
+            });
+            if !is_genesis && !is_wss {
                 return Err(format!(
                     "Database corrupt: fork choice is finalized at {:?} whilst head is finalized at \
                     {:?}",
@@ -506,6 +685,26 @@ where
             );
         }
 
+        // Store the `PersistedBeaconChain` in the database atomically with the metadata so that on
+        // restart we can correctly detect the presence of an initialized database.
+        //
+        // This *must* be stored before constructing the `BeaconChain`, so that its `Drop` instance
+        // doesn't write a `PersistedBeaconChain` without the rest of the batch.
+        self.pending_io_batch.push(BeaconChain::<
+            Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>,
+        >::persist_head_in_batch_standalone(
+            genesis_block_root, &head_tracker
+        ));
+        self.pending_io_batch.push(BeaconChain::<
+            Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>,
+        >::persist_fork_choice_in_batch_standalone(
+            &fork_choice
+        ));
+        store
+            .hot_db
+            .do_atomically(self.pending_io_batch)
+            .map_err(|e| format!("Error writing chain & metadata to disk: {:?}", e))?;
+
         let beacon_chain = BeaconChain {
             spec: self.spec,
             config: self.chain_config,
@@ -516,11 +715,21 @@ where
             // TODO: allow for persisting and loading the pool from disk.
             naive_aggregation_pool: <_>::default(),
             // TODO: allow for persisting and loading the pool from disk.
+            naive_sync_aggregation_pool: <_>::default(),
+            // TODO: allow for persisting and loading the pool from disk.
             observed_attestations: <_>::default(),
             // TODO: allow for persisting and loading the pool from disk.
-            observed_attesters: <_>::default(),
+            observed_sync_contributions: <_>::default(),
+            // TODO: allow for persisting and loading the pool from disk.
+            observed_gossip_attesters: <_>::default(),
+            // TODO: allow for persisting and loading the pool from disk.
+            observed_block_attesters: <_>::default(),
+            // TODO: allow for persisting and loading the pool from disk.
+            observed_sync_contributors: <_>::default(),
             // TODO: allow for persisting and loading the pool from disk.
             observed_aggregators: <_>::default(),
+            // TODO: allow for persisting and loading the pool from disk.
+            observed_sync_aggregators: <_>::default(),
             // TODO: allow for persisting and loading the pool from disk.
             observed_block_producers: <_>::default(),
             // TODO: allow for persisting and loading the pool from disk.
@@ -528,21 +737,25 @@ where
             observed_proposer_slashings: <_>::default(),
             observed_attester_slashings: <_>::default(),
             eth1_chain: self.eth1_chain,
-            genesis_validators_root: canonical_head.beacon_state.genesis_validators_root,
+            execution_layer: self.execution_layer,
+            genesis_validators_root: canonical_head.beacon_state.genesis_validators_root(),
             canonical_head: TimeoutRwLock::new(canonical_head.clone()),
             genesis_block_root,
             genesis_state_root,
             fork_choice: RwLock::new(fork_choice),
             event_handler: self.event_handler,
-            head_tracker: Arc::new(self.head_tracker.unwrap_or_default()),
+            head_tracker,
             snapshot_cache: TimeoutRwLock::new(SnapshotCache::new(
                 DEFAULT_SNAPSHOT_CACHE_SIZE,
                 canonical_head,
             )),
             shuffling_cache: TimeoutRwLock::new(ShufflingCache::new()),
             beacon_proposer_cache: <_>::default(),
+            block_times_cache: <_>::default(),
+            pre_finalization_block_cache: <_>::default(),
             validator_pubkey_cache: TimeoutRwLock::new(validator_pubkey_cache),
-            disabled_forks: self.disabled_forks,
+            attester_cache: <_>::default(),
+            early_attester_cache: <_>::default(),
             shutdown_sender: self
                 .shutdown_sender
                 .ok_or("Cannot build without a shutdown sender.")?,
@@ -556,6 +769,16 @@ where
             .head()
             .map_err(|e| format!("Failed to get head: {:?}", e))?;
 
+        // Prime the attester cache with the head state.
+        beacon_chain
+            .attester_cache
+            .maybe_cache_state(
+                &head.beacon_state,
+                head.beacon_block_root,
+                &beacon_chain.spec,
+            )
+            .map_err(|e| format!("Failed to prime attester cache: {:?}", e))?;
+
         // Only perform the check if it was configured.
         if let Some(wss_checkpoint) = beacon_chain.config.weak_subjectivity_checkpoint {
             if let Err(e) = beacon_chain.verify_weak_subjectivity_checkpoint(
@@ -568,7 +791,7 @@ where
                     "Weak subjectivity checkpoint verification failed on startup!";
                     "head_block_root" => format!("{}", head.beacon_block_root),
                     "head_slot" => format!("{}", head.beacon_block.slot()),
-                    "finalized_epoch" => format!("{}", head.beacon_state.finalized_checkpoint.epoch),
+                    "finalized_epoch" => format!("{}", head.beacon_state.finalized_checkpoint().epoch),
                     "wss_checkpoint_epoch" => format!("{}", wss_checkpoint.epoch),
                     "error" => format!("{:?}", e),
                 );
@@ -584,6 +807,11 @@ where
             "head_block" => format!("{}", head.beacon_block_root),
             "head_slot" => format!("{}", head.beacon_block.slot()),
         );
+
+        // Check for states to reconstruct (in the background).
+        if beacon_chain.config.reconstruct_historic_states {
+            beacon_chain.store_migrator.process_reconstruction();
+        }
 
         Ok(beacon_chain)
     }
@@ -650,16 +878,32 @@ fn genesis_block<T: EthSpec>(
     genesis_state: &mut BeaconState<T>,
     spec: &ChainSpec,
 ) -> Result<SignedBeaconBlock<T>, String> {
-    let mut genesis_block = SignedBeaconBlock {
-        message: BeaconBlock::empty(&spec),
-        // Empty signature, which should NEVER be read. This isn't to-spec, but makes the genesis
-        // block consistent with every other block.
-        signature: Signature::empty(),
-    };
-    genesis_block.message.state_root = genesis_state
+    let mut genesis_block = BeaconBlock::empty(spec);
+    *genesis_block.state_root_mut() = genesis_state
         .update_tree_hash_cache()
         .map_err(|e| format!("Error hashing genesis state: {:?}", e))?;
-    Ok(genesis_block)
+
+    Ok(SignedBeaconBlock::from_block(
+        genesis_block,
+        // Empty signature, which should NEVER be read. This isn't to-spec, but makes the genesis
+        // block consistent with every other block.
+        Signature::empty(),
+    ))
+}
+
+// Helper function to return more useful errors when reading from the database.
+fn descriptive_db_error(item: &str, error: &StoreError) -> String {
+    let additional_info = if let StoreError::SszDecodeError(_) = error {
+        "Ensure the data directory is not initialized for a different network. The \
+        --purge-db flag can be used to permanently delete the existing data directory."
+    } else {
+        "Database corruption may be present. If the issue persists, use \
+        --purge-db to permanently delete the existing data directory."
+    };
+    format!(
+        "DB error when reading {}: {:?}. {}",
+        item, error, additional_info
+    )
 }
 
 #[cfg(not(debug_assertions))]
@@ -667,13 +911,14 @@ fn genesis_block<T: EthSpec>(
 mod test {
     use super::*;
     use eth2_hashing::hash;
-    use genesis::{generate_deterministic_keypairs, interop_genesis_state};
+    use genesis::{
+        generate_deterministic_keypairs, interop_genesis_state, DEFAULT_ETH1_BLOCK_HASH,
+    };
     use sloggers::{null::NullLoggerBuilder, Build};
     use ssz::Encode;
     use std::time::Duration;
     use store::config::StoreConfig;
     use store::{HotColdDB, MemoryStore};
-    use tempfile::tempdir;
     use types::{EthSpec, MinimalEthSpec, Slot};
 
     type TestEthSpec = MinimalEthSpec;
@@ -696,11 +941,12 @@ mod test {
         > = HotColdDB::open_ephemeral(StoreConfig::default(), ChainSpec::minimal(), log.clone())
             .unwrap();
         let spec = MinimalEthSpec::default_spec();
-        let data_dir = tempdir().expect("should create temporary data_dir");
 
         let genesis_state = interop_genesis_state(
             &generate_deterministic_keypairs(validator_count),
             genesis_time,
+            Hash256::from_slice(DEFAULT_ETH1_BLOCK_HASH),
+            None,
             &spec,
         )
         .expect("should create interop genesis state");
@@ -710,7 +956,6 @@ mod test {
         let chain = BeaconChainBuilder::new(MinimalEthSpec)
             .logger(log.clone())
             .store(Arc::new(store))
-            .data_dir(data_dir.path().to_path_buf())
             .genesis_state(genesis_state)
             .expect("should build state using recent genesis")
             .dummy_eth1_backend()
@@ -727,9 +972,10 @@ mod test {
         let state = head.beacon_state;
         let block = head.beacon_block;
 
-        assert_eq!(state.slot, Slot::new(0), "should start from genesis");
+        assert_eq!(state.slot(), Slot::new(0), "should start from genesis");
         assert_eq!(
-            state.genesis_time, 13_371_337,
+            state.genesis_time(),
+            13_371_337,
             "should have the correct genesis time"
         );
         assert_eq!(
@@ -747,7 +993,7 @@ mod test {
             "should store genesis block under zero hash alias"
         );
         assert_eq!(
-            state.validators.len(),
+            state.validators().len(),
             validator_count,
             "should have correct validator count"
         );
@@ -766,28 +1012,35 @@ mod test {
 
         let keypairs = generate_deterministic_keypairs(validator_count);
 
-        let state = interop_genesis_state::<TestEthSpec>(&keypairs, genesis_time, spec)
-            .expect("should build state");
+        let state = interop_genesis_state::<TestEthSpec>(
+            &keypairs,
+            genesis_time,
+            Hash256::from_slice(DEFAULT_ETH1_BLOCK_HASH),
+            None,
+            spec,
+        )
+        .expect("should build state");
 
         assert_eq!(
-            state.eth1_data.block_hash,
+            state.eth1_data().block_hash,
             Hash256::from_slice(&[0x42; 32]),
             "eth1 block hash should be co-ordinated junk"
         );
 
         assert_eq!(
-            state.genesis_time, genesis_time,
+            state.genesis_time(),
+            genesis_time,
             "genesis time should be as specified"
         );
 
-        for b in &state.balances {
+        for b in state.balances() {
             assert_eq!(
                 *b, spec.max_effective_balance,
                 "validator balances should be max effective balance"
             );
         }
 
-        for v in &state.validators {
+        for v in state.validators() {
             let creds = v.withdrawal_credentials.as_bytes();
             assert_eq!(
                 creds[0], spec.bls_withdrawal_prefix_byte,
@@ -801,13 +1054,13 @@ mod test {
         }
 
         assert_eq!(
-            state.balances.len(),
+            state.balances().len(),
             validator_count,
             "validator balances len should be correct"
         );
 
         assert_eq!(
-            state.validators.len(),
+            state.validators().len(),
             validator_count,
             "validator count should be correct"
         );

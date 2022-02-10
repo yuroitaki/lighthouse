@@ -1,8 +1,14 @@
-use crate::{BeaconChain, BeaconChainTypes};
+use crate::observed_attesters::SlotSubcommitteeIndex;
+use crate::types::consts::altair::SYNC_COMMITTEE_SUBNET_COUNT;
+use crate::{BeaconChain, BeaconChainError, BeaconChainTypes};
 use lazy_static::lazy_static;
 pub use lighthouse_metrics::*;
 use slot_clock::SlotClock;
+use std::time::Duration;
 use types::{BeaconState, Epoch, EthSpec, Hash256, Slot};
+
+/// The maximum time to wait for the snapshot cache lock during a metrics scrape.
+const SNAPSHOT_CACHE_TIMEOUT: Duration = Duration::from_millis(100);
 
 lazy_static! {
     /*
@@ -15,6 +21,18 @@ lazy_static! {
     pub static ref BLOCK_PROCESSING_SUCCESSES: Result<IntCounter> = try_create_int_counter(
         "beacon_block_processing_successes_total",
         "Count of blocks processed without error"
+    );
+    pub static ref BLOCK_PROCESSING_SNAPSHOT_CACHE_SIZE: Result<IntGauge> = try_create_int_gauge(
+        "beacon_block_processing_snapshot_cache_size",
+        "Count snapshots in the snapshot cache"
+    );
+    pub static ref BLOCK_PROCESSING_SNAPSHOT_CACHE_MISSES: Result<IntCounter> = try_create_int_counter(
+        "beacon_block_processing_snapshot_cache_misses",
+        "Count of snapshot cache misses"
+    );
+    pub static ref BLOCK_PROCESSING_SNAPSHOT_CACHE_CLONES: Result<IntCounter> = try_create_int_counter(
+        "beacon_block_processing_snapshot_cache_clones",
+        "Count of snapshot cache clones"
     );
     pub static ref BLOCK_PROCESSING_TIMES: Result<Histogram> =
         try_create_histogram("beacon_block_processing_seconds", "Full runtime of block processing");
@@ -53,6 +71,10 @@ lazy_static! {
     pub static ref BLOCK_PROCESSING_ATTESTATION_OBSERVATION: Result<Histogram> = try_create_histogram(
         "beacon_block_processing_attestation_observation_seconds",
         "Time spent hashing and remembering all the attestations in the block"
+    );
+    pub static ref BLOCK_SYNC_AGGREGATE_SET_BITS: Result<IntGauge> = try_create_int_gauge(
+        "block_sync_aggregate_set_bits",
+        "The number of true bits in the last sync aggregate in a block"
     );
 
     /*
@@ -101,6 +123,11 @@ lazy_static! {
         "Number of attestations in a block"
     );
 
+    pub static ref BLOCK_SIZE: Result<Histogram> = try_create_histogram(
+        "beacon_block_total_size",
+        "Size of a signed beacon block"
+    );
+
     /*
      * Unaggregated Attestation Verification
      */
@@ -139,10 +166,6 @@ lazy_static! {
     pub static ref ATTESTATION_PROCESSING_APPLY_TO_AGG_POOL: Result<Histogram> = try_create_histogram(
         "beacon_attestation_processing_apply_to_agg_pool",
         "Time spent applying an attestation to the naive aggregation pool"
-    );
-    pub static ref ATTESTATION_PROCESSING_AGG_POOL_MAPS_WRITE_LOCK: Result<Histogram> = try_create_histogram(
-        "beacon_attestation_processing_agg_pool_maps_write_lock",
-        "Time spent waiting for the maps write lock when adding to the agg poll"
     );
     pub static ref ATTESTATION_PROCESSING_AGG_POOL_PRUNE: Result<Histogram> = try_create_histogram(
         "beacon_attestation_processing_agg_pool_prune",
@@ -198,6 +221,26 @@ lazy_static! {
     );
 
     /*
+     * Batch Attestation Processing
+     */
+    pub static ref ATTESTATION_PROCESSING_BATCH_AGG_SIGNATURE_SETUP_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_attestation_processing_batch_agg_signature_setup_times",
+        "Time spent on setting up for the signature verification of batch aggregate processing"
+    );
+    pub static ref ATTESTATION_PROCESSING_BATCH_AGG_SIGNATURE_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_attestation_processing_batch_agg_signature_times",
+        "Time spent on the signature verification of batch aggregate attestation processing"
+    );
+    pub static ref ATTESTATION_PROCESSING_BATCH_UNAGG_SIGNATURE_SETUP_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_attestation_processing_batch_unagg_signature_setup_times",
+        "Time spent on setting up for the signature verification of batch unaggregate processing"
+    );
+    pub static ref ATTESTATION_PROCESSING_BATCH_UNAGG_SIGNATURE_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_attestation_processing_batch_unagg_signature_times",
+        "Time spent on the signature verification of batch unaggregate attestation processing"
+    );
+
+    /*
      * Shuffling cache
      */
     pub static ref SHUFFLING_CACHE_HITS: Result<IntCounter> =
@@ -206,19 +249,31 @@ lazy_static! {
         try_create_int_counter("beacon_shuffling_cache_misses_total", "Count of times shuffling cache fulfils request");
 
     /*
+     * Early attester cache
+     */
+    pub static ref BEACON_EARLY_ATTESTER_CACHE_HITS: Result<IntCounter> = try_create_int_counter(
+        "beacon_early_attester_cache_hits",
+        "Count of times the early attester cache returns an attestation"
+    );
+
+    /*
      * Attestation Production
      */
-    pub static ref ATTESTATION_PRODUCTION_REQUESTS: Result<IntCounter> = try_create_int_counter(
-        "beacon_attestation_production_requests_total",
-        "Count of all attestation production requests"
-    );
-    pub static ref ATTESTATION_PRODUCTION_SUCCESSES: Result<IntCounter> = try_create_int_counter(
-        "beacon_attestation_production_successes_total",
-        "Count of attestations processed without error"
-    );
-    pub static ref ATTESTATION_PRODUCTION_TIMES: Result<Histogram> = try_create_histogram(
+    pub static ref ATTESTATION_PRODUCTION_SECONDS: Result<Histogram> = try_create_histogram(
         "beacon_attestation_production_seconds",
         "Full runtime of attestation production"
+    );
+    pub static ref ATTESTATION_PRODUCTION_HEAD_SCRAPE_SECONDS: Result<Histogram> = try_create_histogram(
+        "attestation_production_head_scrape_seconds",
+        "Time taken to read the head state"
+    );
+    pub static ref ATTESTATION_PRODUCTION_CACHE_INTERACTION_SECONDS: Result<Histogram> = try_create_histogram(
+        "attestation_production_cache_interaction_seconds",
+        "Time spent interacting with the attester cache"
+    );
+    pub static ref ATTESTATION_PRODUCTION_CACHE_PRIME_SECONDS: Result<Histogram> = try_create_histogram(
+        "attestation_production_cache_prime_seconds",
+        "Time spent loading a new state from the disk due to a cache miss"
     );
 }
 
@@ -243,6 +298,10 @@ lazy_static! {
         "beacon_fork_choice_reorg_total",
         "Count of occasions fork choice has switched to a different chain"
     );
+    pub static ref FORK_CHOICE_REORG_COUNT_INTEROP: Result<IntCounter> = try_create_int_counter(
+        "beacon_reorgs_total",
+        "Count of occasions fork choice has switched to a different chain"
+    );
     pub static ref FORK_CHOICE_TIMES: Result<Histogram> =
         try_create_histogram("beacon_fork_choice_seconds", "Full runtime of fork choice");
     pub static ref FORK_CHOICE_FIND_HEAD_TIMES: Result<Histogram> =
@@ -254,6 +313,10 @@ lazy_static! {
     pub static ref FORK_CHOICE_PROCESS_ATTESTATION_TIMES: Result<Histogram> = try_create_histogram(
         "beacon_fork_choice_process_attestation_seconds",
         "Time taken to add an attestation to fork choice"
+    );
+    pub static ref FORK_CHOICE_SET_HEAD_LAG_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_fork_choice_set_head_lag_times",
+        "Time taken between finding the head and setting the canonical head value"
     );
     pub static ref BALANCES_CACHE_HITS: Result<IntCounter> =
         try_create_int_counter("beacon_balances_cache_hits_total", "Count of times balances cache fulfils request");
@@ -285,6 +348,8 @@ lazy_static! {
         try_create_histogram("beacon_update_head_seconds", "Time taken to update the canonical head");
     pub static ref HEAD_STATE_SLOT: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_slot", "Slot of the block at the head of the chain");
+    pub static ref HEAD_STATE_SLOT_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_head_slot", "Slot of the block at the head of the chain");
     pub static ref HEAD_STATE_ROOT: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_root", "Root of the block at the head of the chain");
     pub static ref HEAD_STATE_LATEST_BLOCK_SLOT: Result<IntGauge> =
@@ -293,18 +358,26 @@ lazy_static! {
         try_create_int_gauge("beacon_head_state_current_justified_root", "Current justified root at the head of the chain");
     pub static ref HEAD_STATE_CURRENT_JUSTIFIED_EPOCH: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_current_justified_epoch", "Current justified epoch at the head of the chain");
+    pub static ref HEAD_STATE_CURRENT_JUSTIFIED_EPOCH_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_current_justified_epoch", "Current justified epoch at the head of the chain");
     pub static ref HEAD_STATE_PREVIOUS_JUSTIFIED_ROOT: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_previous_justified_root", "Previous justified root at the head of the chain");
     pub static ref HEAD_STATE_PREVIOUS_JUSTIFIED_EPOCH: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_previous_justified_epoch", "Previous justified epoch at the head of the chain");
+    pub static ref HEAD_STATE_PREVIOUS_JUSTIFIED_EPOCH_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_previous_justified_epoch", "Previous justified epoch at the head of the chain");
     pub static ref HEAD_STATE_FINALIZED_ROOT: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_finalized_root", "Finalized root at the head of the chain");
     pub static ref HEAD_STATE_FINALIZED_EPOCH: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_finalized_epoch", "Finalized epoch at the head of the chain");
+    pub static ref HEAD_STATE_FINALIZED_EPOCH_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_finalized_epoch", "Finalized epoch at the head of the chain");
     pub static ref HEAD_STATE_TOTAL_VALIDATORS: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_total_validators_total", "Count of validators at the head of the chain");
     pub static ref HEAD_STATE_ACTIVE_VALIDATORS: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_active_validators_total", "Count of active validators at the head of the chain");
+    pub static ref HEAD_STATE_ACTIVE_VALIDATORS_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_current_active_validators", "Count of active validators at the head of the chain");
     pub static ref HEAD_STATE_VALIDATOR_BALANCES: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_validator_balances_total", "Sum of all validator balances at the head of the chain");
     pub static ref HEAD_STATE_SLASHED_VALIDATORS: Result<IntGauge> =
@@ -313,34 +386,27 @@ lazy_static! {
         try_create_int_gauge("beacon_head_state_withdrawn_validators_total", "Sum of all validator balances at the head of the chain");
     pub static ref HEAD_STATE_ETH1_DEPOSIT_INDEX: Result<IntGauge> =
         try_create_int_gauge("beacon_head_state_eth1_deposit_index", "Eth1 deposit index at the head of the chain");
+    pub static ref HEAD_STATE_ETH1_DEPOSITS_INTEROP: Result<IntGauge> =
+        try_create_int_gauge("beacon_processed_deposits_total", "Total Eth1 deposits at the head of the chain");
 
     /*
      * Operation Pool
      */
     pub static ref OP_POOL_NUM_ATTESTATIONS: Result<IntGauge> =
         try_create_int_gauge("beacon_op_pool_attestations_total", "Count of attestations in the op pool");
+    pub static ref OP_POOL_NUM_ATTESTATION_DATA: Result<IntGauge> =
+        try_create_int_gauge("beacon_op_pool_attestation_data_total", "Count of attestation data in the op pool");
+    pub static ref OP_POOL_MAX_AGGREGATES_PER_DATA: Result<IntGauge> =
+        try_create_int_gauge("beacon_op_pool_max_aggregates_per_data", "Max aggregates per AttestationData");
     pub static ref OP_POOL_NUM_ATTESTER_SLASHINGS: Result<IntGauge> =
         try_create_int_gauge("beacon_op_pool_attester_slashings_total", "Count of attester slashings in the op pool");
     pub static ref OP_POOL_NUM_PROPOSER_SLASHINGS: Result<IntGauge> =
         try_create_int_gauge("beacon_op_pool_proposer_slashings_total", "Count of proposer slashings in the op pool");
     pub static ref OP_POOL_NUM_VOLUNTARY_EXITS: Result<IntGauge> =
         try_create_int_gauge("beacon_op_pool_voluntary_exits_total", "Count of voluntary exits in the op pool");
+    pub static ref OP_POOL_NUM_SYNC_CONTRIBUTIONS: Result<IntGauge> =
+        try_create_int_gauge("beacon_op_pool_sync_contributions_total", "Count of sync contributions in the op pool");
 
-    /*
-     * Participation Metrics
-     */
-    pub static ref PARTICIPATION_PREV_EPOCH_ATTESTER: Result<Gauge> = try_create_float_gauge(
-        "beacon_participation_prev_epoch_attester",
-        "Ratio of attesting balances to total balances"
-    );
-    pub static ref PARTICIPATION_PREV_EPOCH_TARGET_ATTESTER: Result<Gauge> = try_create_float_gauge(
-        "beacon_participation_prev_epoch_target_attester",
-        "Ratio of target-attesting balances to total balances"
-    );
-    pub static ref PARTICIPATION_PREV_EPOCH_HEAD_ATTESTER: Result<Gauge> = try_create_float_gauge(
-        "beacon_participation_prev_epoch_head_attester",
-        "Ratio of head-attesting balances to total balances"
-    );
 
     /*
      * Attestation Observation Metrics
@@ -352,6 +418,18 @@ lazy_static! {
     pub static ref ATTN_OBSERVATION_PREV_EPOCH_AGGREGATORS: Result<IntGauge> = try_create_int_gauge(
         "beacon_attn_observation_epoch_aggregators",
         "Count of aggregators that have been seen by the beacon chain in the previous epoch"
+    );
+
+    /*
+     * Sync Committee Observation Metrics
+     */
+    pub static ref SYNC_COMM_OBSERVATION_PREV_SLOT_SIGNERS: Result<IntGauge> = try_create_int_gauge(
+        "beacon_sync_comm_observation_slot_signers",
+        "Count of sync committee contributors that have been seen by the beacon chain in the previous slot"
+    );
+    pub static ref SYNC_COMM_OBSERVATION_PREV_SLOT_AGGREGATORS: Result<IntGauge> = try_create_int_gauge(
+        "beacon_sync_comm_observation_slot_aggregators",
+        "Count of sync committee aggregators that have been seen by the beacon chain in the previous slot"
     );
 }
 
@@ -544,6 +622,48 @@ lazy_static! {
             "The number of attester slashings seen in the previous epoch.",
             &["validator"]
         );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_COMMITTEE_MESSAGES_TOTAL: Result<IntGaugeVec> =
+        try_create_int_gauge_vec(
+            "validator_monitor_prev_epoch_sync_committee_messages_total",
+            "The number of sync committee messages seen in the previous epoch.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_COMMITTEE_MESSAGES_MIN_DELAY_SECONDS: Result<HistogramVec> =
+        try_create_histogram_vec(
+            "validator_monitor_prev_epoch_sync_committee_messages_min_delay_seconds",
+            "The min delay between when the validator should send the sync committee message and when it was received.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_CONTRIBUTION_INCLUSIONS: Result<IntGaugeVec> =
+        try_create_int_gauge_vec(
+            "validator_monitor_prev_epoch_sync_contribution_inclusions",
+            "The count of times a sync signature was seen inside a sync contribution.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_SIGNATURE_BLOCK_INCLUSIONS: Result<IntGaugeVec> =
+        try_create_int_gauge_vec(
+            "validator_monitor_prev_epoch_sync_signature_block_inclusions",
+            "The count of times a sync signature was seen inside a block.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_CONTRIBUTIONS_TOTAL: Result<IntGaugeVec> =
+        try_create_int_gauge_vec(
+            "validator_monitor_prev_epoch_sync_contributions_total",
+            "The number of sync contributions seen in the previous epoch.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_PREV_EPOCH_SYNC_CONTRIBUTION_MIN_DELAY_SECONDS: Result<HistogramVec> =
+        try_create_histogram_vec(
+            "validator_monitor_prev_epoch_sync_contribution_min_delay_seconds",
+            "The min delay between when the validator should send the sync contribution and when it was received.",
+            &["validator"]
+        );
+    pub static ref VALIDATOR_MONITOR_VALIDATOR_IN_CURRENT_SYNC_COMMITTEE: Result<IntGaugeVec> =
+        try_create_int_gauge_vec(
+            "validator_monitor_validator_in_current_sync_committee",
+            "Is the validator in the current sync committee (1 for true and 0 for false)",
+            &["validator"]
+        );
 
     /*
      * Validator Monitor Metrics (real-time)
@@ -562,6 +682,26 @@ lazy_static! {
         "The delay between when the validator should send the attestation and when it was received.",
         &["src", "validator"]
     );
+    pub static ref VALIDATOR_MONITOR_SYNC_COMMITTEE_MESSAGES_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
+        "validator_monitor_sync_committee_messages_total",
+        "Number of sync committee messages seen",
+        &["src", "validator"]
+    );
+    pub static ref VALIDATOR_MONITOR_SYNC_COMMITTEE_MESSAGES_DELAY_SECONDS: Result<HistogramVec> = try_create_histogram_vec(
+        "validator_monitor_sync_committee_messages_delay_seconds",
+        "The delay between when the validator should send the sync committee message and when it was received.",
+        &["src", "validator"]
+    );
+    pub static ref VALIDATOR_MONITOR_SYNC_CONTRIBUTIONS_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
+        "validator_monitor_sync_contributions_total",
+        "Number of sync contributions seen",
+        &["src", "validator"]
+    );
+    pub static ref VALIDATOR_MONITOR_SYNC_CONTRIBUTIONS_DELAY_SECONDS: Result<HistogramVec> = try_create_histogram_vec(
+        "validator_monitor_sync_contributions_delay_seconds",
+        "The delay between when the aggregator should send the sync contribution and when it was received.",
+        &["src", "validator"]
+    );
     pub static ref VALIDATOR_MONITOR_AGGREGATED_ATTESTATION_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
         "validator_monitor_aggregated_attestation_total",
         "Number of aggregated attestations seen",
@@ -577,6 +717,11 @@ lazy_static! {
         "Number of times an attestation has been seen in an aggregate",
         &["src", "validator"]
     );
+    pub static ref VALIDATOR_MONITOR_SYNC_COMMITTEE_MESSAGE_IN_CONTRIBUTION_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
+        "validator_monitor_sync_committee_message_in_contribution_total",
+        "Number of times a sync committee message has been seen in a sync contribution",
+        &["src", "validator"]
+    );
     pub static ref VALIDATOR_MONITOR_ATTESTATION_IN_AGGREGATE_DELAY_SECONDS: Result<HistogramVec> = try_create_histogram_vec(
         "validator_monitor_attestation_in_aggregate_delay_seconds",
         "The delay between when the validator should send the aggregate and when it was received.",
@@ -585,6 +730,11 @@ lazy_static! {
     pub static ref VALIDATOR_MONITOR_ATTESTATION_IN_BLOCK_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
         "validator_monitor_attestation_in_block_total",
         "Number of times an attestation has been seen in a block",
+        &["src", "validator"]
+    );
+    pub static ref VALIDATOR_MONITOR_SYNC_COMMITTEE_MESSAGE_IN_BLOCK_TOTAL: Result<IntCounterVec> = try_create_int_counter_vec(
+        "validator_monitor_sync_committee_message_in_block_total",
+        "Number of times a validator's sync committee message has been seen in a sync aggregate",
         &["src", "validator"]
     );
     pub static ref VALIDATOR_MONITOR_ATTESTATION_IN_BLOCK_DELAY_SLOTS: Result<IntGaugeVec> = try_create_int_gauge_vec(
@@ -621,13 +771,26 @@ lazy_static! {
     /*
      * Block Delay Metrics
      */
-    pub static ref BEACON_BLOCK_IMPORTED_SLOT_START_DELAY_TIME: Result<Histogram> = try_create_histogram(
-        "beacon_block_imported_slot_start_delay_time",
-        "Duration between the start of the blocks slot and the current time when it was imported.",
+    pub static ref BEACON_BLOCK_OBSERVED_SLOT_START_DELAY_TIME: Result<Histogram> = try_create_histogram(
+        "beacon_block_observed_slot_start_delay_time",
+        "Duration between the start of the block's slot and the time the block was observed.",
+    );
+    pub static ref BEACON_BLOCK_IMPORTED_OBSERVED_DELAY_TIME: Result<Histogram> = try_create_histogram(
+        "beacon_block_imported_observed_delay_time",
+        "Duration between the time the block was observed and the time when it was imported.",
+    );
+    pub static ref BEACON_BLOCK_HEAD_IMPORTED_DELAY_TIME: Result<Histogram> = try_create_histogram(
+        "beacon_block_head_imported_delay_time",
+        "Duration between the time the block was imported and the time when it was set as head.",
     );
     pub static ref BEACON_BLOCK_HEAD_SLOT_START_DELAY_TIME: Result<Histogram> = try_create_histogram(
         "beacon_block_head_slot_start_delay_time",
-        "Duration between the start of the blocks slot and the current time when it was as head.",
+        "Duration between the start of the block's slot and the time when it was set as head.",
+    );
+    pub static ref BEACON_BLOCK_HEAD_SLOT_START_DELAY_EXCEEDED_TOTAL: Result<IntCounter> = try_create_int_counter(
+        "beacon_block_head_slot_start_delay_exceeded_total",
+        "Triggered when the duration between the start of the block's slot and the current time \
+        will result in failed attestations.",
     );
 
     /*
@@ -640,20 +803,164 @@ lazy_static! {
         );
 }
 
+// Fourth lazy-static block is used to account for macro recursion limit.
+lazy_static! {
+    /*
+     * Sync Committee Message Verification
+     */
+    pub static ref SYNC_MESSAGE_PROCESSING_REQUESTS: Result<IntCounter> = try_create_int_counter(
+        "beacon_sync_committee_message_processing_requests_total",
+        "Count of all sync messages submitted for processing"
+    );
+    pub static ref SYNC_MESSAGE_PROCESSING_SUCCESSES: Result<IntCounter> = try_create_int_counter(
+        "beacon_sync_committee_message_processing_successes_total",
+        "Number of sync messages verified for gossip"
+    );
+    pub static ref SYNC_MESSAGE_GOSSIP_VERIFICATION_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_committee_message_gossip_verification_seconds",
+        "Full runtime of sync contribution gossip verification"
+    );
+
+    /*
+     * Sync Committee Contribution Verification
+     */
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_REQUESTS: Result<IntCounter> = try_create_int_counter(
+        "beacon_sync_contribution_processing_requests_total",
+        "Count of all sync contributions submitted for processing"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_SUCCESSES: Result<IntCounter> = try_create_int_counter(
+        "beacon_sync_contribution_processing_successes_total",
+        "Number of sync contributions verified for gossip"
+    );
+    pub static ref SYNC_CONTRIBUTION_GOSSIP_VERIFICATION_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_gossip_verification_seconds",
+        "Full runtime of sync contribution gossip verification"
+    );
+
+    /*
+     * General Sync Committee Contribution Processing
+     */
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_APPLY_TO_AGG_POOL: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_apply_to_agg_pool",
+        "Time spent applying a sync contribution to the naive aggregation pool"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_AGG_POOL_PRUNE: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_agg_pool_prune",
+        "Time spent for the agg pool to prune"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_AGG_POOL_INSERT: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_agg_pool_insert",
+        "Time spent for the outer pool.insert() function of agg pool"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_AGG_POOL_CORE_INSERT: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_agg_pool_core_insert",
+        "Time spent for the core map.insert() function of agg pool"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_AGG_POOL_AGGREGATION: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_agg_pool_aggregation",
+        "Time spent doing signature aggregation when adding to the agg poll"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_AGG_POOL_CREATE_MAP: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_agg_pool_create_map",
+        "Time spent for creating a map for a new slot"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_APPLY_TO_OP_POOL: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_apply_to_op_pool",
+        "Time spent applying a sync contribution to the block inclusion pool"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_SIGNATURE_SETUP_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_signature_setup_seconds",
+        "Time spent on setting up for the signature verification of sync contribution processing"
+    );
+    pub static ref SYNC_CONTRIBUTION_PROCESSING_SIGNATURE_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_contribution_processing_signature_seconds",
+        "Time spent on the signature verification of sync contribution processing"
+    );
+
+        /*
+     * General Sync Committee Contribution Processing
+     */
+    pub static ref SYNC_MESSAGE_PROCESSING_SIGNATURE_SETUP_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_committee_message_processing_signature_setup_seconds",
+        "Time spent on setting up for the signature verification of sync message processing"
+    );
+    pub static ref SYNC_MESSAGE_PROCESSING_SIGNATURE_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_sync_committee_message_processing_signature_seconds",
+        "Time spent on the signature verification of sync message processing"
+    );
+
+    /*
+     * Checkpoint sync & backfill
+     */
+    pub static ref BACKFILL_SIGNATURE_SETUP_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_backfill_signature_setup_seconds",
+        "Time spent constructing the signature set during backfill sync"
+    );
+    pub static ref BACKFILL_SIGNATURE_VERIFY_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_backfill_signature_verify_seconds",
+        "Time spent verifying the signature set during backfill sync"
+    );
+    pub static ref BACKFILL_SIGNATURE_TOTAL_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_backfill_signature_total_seconds",
+        "Time spent verifying the signature set during backfill sync, including setup"
+    );
+
+    /*
+     * Pre-finalization block cache.
+     */
+    pub static ref PRE_FINALIZATION_BLOCK_CACHE_SIZE: Result<IntGauge> =
+        try_create_int_gauge(
+            "beacon_pre_finalization_block_cache_size",
+            "Number of pre-finalization block roots cached for quick rejection"
+        );
+    pub static ref PRE_FINALIZATION_BLOCK_LOOKUP_COUNT: Result<IntGauge> =
+        try_create_int_gauge(
+            "beacon_pre_finalization_block_lookup_count",
+            "Number of block roots subject to single block lookups"
+        );
+}
+
 /// Scrape the `beacon_chain` for metrics that are not constantly updated (e.g., the present slot,
 /// head state info, etc) and update the Prometheus `DEFAULT_REGISTRY`.
 pub fn scrape_for_metrics<T: BeaconChainTypes>(beacon_chain: &BeaconChain<T>) {
-    if let Ok(head) = beacon_chain.head() {
-        scrape_head_state::<T>(&head.beacon_state, head.beacon_state_root())
-    }
+    let _ = beacon_chain.with_head(|head| {
+        scrape_head_state(&head.beacon_state, head.beacon_state_root());
+        Ok::<_, BeaconChainError>(())
+    });
 
     if let Some(slot) = beacon_chain.slot_clock.now() {
         scrape_attestation_observation(slot, beacon_chain);
+        scrape_sync_committee_observation(slot, beacon_chain);
+    }
+
+    let attestation_stats = beacon_chain.op_pool.attestation_stats();
+
+    if let Some(snapshot_cache) = beacon_chain
+        .snapshot_cache
+        .try_write_for(SNAPSHOT_CACHE_TIMEOUT)
+    {
+        set_gauge(
+            &BLOCK_PROCESSING_SNAPSHOT_CACHE_SIZE,
+            snapshot_cache.len() as i64,
+        )
+    }
+
+    if let Some((size, num_lookups)) = beacon_chain.pre_finalization_block_cache.metrics() {
+        set_gauge_by_usize(&PRE_FINALIZATION_BLOCK_CACHE_SIZE, size);
+        set_gauge_by_usize(&PRE_FINALIZATION_BLOCK_LOOKUP_COUNT, num_lookups);
     }
 
     set_gauge_by_usize(
         &OP_POOL_NUM_ATTESTATIONS,
-        beacon_chain.op_pool.num_attestations(),
+        attestation_stats.num_attestations,
+    );
+    set_gauge_by_usize(
+        &OP_POOL_NUM_ATTESTATION_DATA,
+        attestation_stats.num_attestation_data,
+    );
+    set_gauge_by_usize(
+        &OP_POOL_MAX_AGGREGATES_PER_DATA,
+        attestation_stats.max_aggregates_per_data,
     );
     set_gauge_by_usize(
         &OP_POOL_NUM_ATTESTER_SLASHINGS,
@@ -667,6 +974,10 @@ pub fn scrape_for_metrics<T: BeaconChainTypes>(beacon_chain: &BeaconChain<T>) {
         &OP_POOL_NUM_VOLUNTARY_EXITS,
         beacon_chain.op_pool.num_voluntary_exits(),
     );
+    set_gauge_by_usize(
+        &OP_POOL_NUM_SYNC_CONTRIBUTIONS,
+        beacon_chain.op_pool.num_sync_contributions(),
+    );
 
     beacon_chain
         .validator_monitor
@@ -675,64 +986,95 @@ pub fn scrape_for_metrics<T: BeaconChainTypes>(beacon_chain: &BeaconChain<T>) {
 }
 
 /// Scrape the given `state` assuming it's the head state, updating the `DEFAULT_REGISTRY`.
-fn scrape_head_state<T: BeaconChainTypes>(state: &BeaconState<T::EthSpec>, state_root: Hash256) {
-    set_gauge_by_slot(&HEAD_STATE_SLOT, state.slot);
+fn scrape_head_state<T: EthSpec>(state: &BeaconState<T>, state_root: Hash256) {
+    set_gauge_by_slot(&HEAD_STATE_SLOT, state.slot());
+    set_gauge_by_slot(&HEAD_STATE_SLOT_INTEROP, state.slot());
     set_gauge_by_hash(&HEAD_STATE_ROOT, state_root);
     set_gauge_by_slot(
         &HEAD_STATE_LATEST_BLOCK_SLOT,
-        state.latest_block_header.slot,
+        state.latest_block_header().slot,
     );
     set_gauge_by_hash(
         &HEAD_STATE_CURRENT_JUSTIFIED_ROOT,
-        state.current_justified_checkpoint.root,
+        state.current_justified_checkpoint().root,
     );
     set_gauge_by_epoch(
         &HEAD_STATE_CURRENT_JUSTIFIED_EPOCH,
-        state.current_justified_checkpoint.epoch,
+        state.current_justified_checkpoint().epoch,
+    );
+    set_gauge_by_epoch(
+        &HEAD_STATE_CURRENT_JUSTIFIED_EPOCH_INTEROP,
+        state.current_justified_checkpoint().epoch,
     );
     set_gauge_by_hash(
         &HEAD_STATE_PREVIOUS_JUSTIFIED_ROOT,
-        state.previous_justified_checkpoint.root,
+        state.previous_justified_checkpoint().root,
     );
     set_gauge_by_epoch(
         &HEAD_STATE_PREVIOUS_JUSTIFIED_EPOCH,
-        state.previous_justified_checkpoint.epoch,
+        state.previous_justified_checkpoint().epoch,
     );
-    set_gauge_by_hash(&HEAD_STATE_FINALIZED_ROOT, state.finalized_checkpoint.root);
+    set_gauge_by_epoch(
+        &HEAD_STATE_PREVIOUS_JUSTIFIED_EPOCH_INTEROP,
+        state.previous_justified_checkpoint().epoch,
+    );
+    set_gauge_by_hash(
+        &HEAD_STATE_FINALIZED_ROOT,
+        state.finalized_checkpoint().root,
+    );
     set_gauge_by_epoch(
         &HEAD_STATE_FINALIZED_EPOCH,
-        state.finalized_checkpoint.epoch,
+        state.finalized_checkpoint().epoch,
     );
-    set_gauge_by_usize(&HEAD_STATE_TOTAL_VALIDATORS, state.validators.len());
-    set_gauge_by_u64(&HEAD_STATE_VALIDATOR_BALANCES, state.balances.iter().sum());
-    set_gauge_by_usize(
-        &HEAD_STATE_ACTIVE_VALIDATORS,
-        state
-            .validators
-            .iter()
-            .filter(|v| v.is_active_at(state.current_epoch()))
-            .count(),
+    set_gauge_by_epoch(
+        &HEAD_STATE_FINALIZED_EPOCH_INTEROP,
+        state.finalized_checkpoint().epoch,
     );
-    set_gauge_by_usize(
-        &HEAD_STATE_SLASHED_VALIDATORS,
-        state.validators.iter().filter(|v| v.slashed).count(),
+    set_gauge_by_usize(&HEAD_STATE_TOTAL_VALIDATORS, state.validators().len());
+    set_gauge_by_u64(
+        &HEAD_STATE_VALIDATOR_BALANCES,
+        state.balances().iter().sum(),
     );
-    set_gauge_by_usize(
-        &HEAD_STATE_WITHDRAWN_VALIDATORS,
-        state
-            .validators
-            .iter()
-            .filter(|v| v.is_withdrawable_at(state.current_epoch()))
-            .count(),
+    set_gauge_by_u64(&HEAD_STATE_ETH1_DEPOSIT_INDEX, state.eth1_deposit_index());
+    set_gauge_by_u64(
+        &HEAD_STATE_ETH1_DEPOSITS_INTEROP,
+        state.eth1_data().deposit_count,
     );
-    set_gauge_by_u64(&HEAD_STATE_ETH1_DEPOSIT_INDEX, state.eth1_deposit_index);
+    set_gauge_by_usize(&HEAD_STATE_TOTAL_VALIDATORS, state.validators().len());
+    set_gauge_by_u64(
+        &HEAD_STATE_VALIDATOR_BALANCES,
+        state.balances().iter().sum(),
+    );
+
+    let mut num_active: usize = 0;
+    let mut num_slashed: usize = 0;
+    let mut num_withdrawn: usize = 0;
+
+    for v in state.validators() {
+        if v.is_active_at(state.current_epoch()) {
+            num_active += 1;
+        }
+
+        if v.slashed {
+            num_slashed += 1;
+        }
+
+        if v.is_withdrawable_at(state.current_epoch()) {
+            num_withdrawn += 1;
+        }
+    }
+
+    set_gauge_by_usize(&HEAD_STATE_ACTIVE_VALIDATORS, num_active);
+    set_gauge_by_usize(&HEAD_STATE_ACTIVE_VALIDATORS_INTEROP, num_active);
+    set_gauge_by_usize(&HEAD_STATE_SLASHED_VALIDATORS, num_slashed);
+    set_gauge_by_usize(&HEAD_STATE_WITHDRAWN_VALIDATORS, num_withdrawn);
 }
 
 fn scrape_attestation_observation<T: BeaconChainTypes>(slot_now: Slot, chain: &BeaconChain<T>) {
     let prev_epoch = slot_now.epoch(T::EthSpec::slots_per_epoch()) - 1;
 
     if let Some(count) = chain
-        .observed_attesters
+        .observed_gossip_attesters
         .read()
         .observed_validator_count(prev_epoch)
     {
@@ -746,6 +1088,34 @@ fn scrape_attestation_observation<T: BeaconChainTypes>(slot_now: Slot, chain: &B
     {
         set_gauge_by_usize(&ATTN_OBSERVATION_PREV_EPOCH_AGGREGATORS, count);
     }
+}
+
+fn scrape_sync_committee_observation<T: BeaconChainTypes>(slot_now: Slot, chain: &BeaconChain<T>) {
+    let prev_slot = slot_now - 1;
+
+    let contributors = chain.observed_sync_contributors.read();
+    let mut contributor_sum = 0;
+    for i in 0..SYNC_COMMITTEE_SUBNET_COUNT {
+        if let Some(count) =
+            contributors.observed_validator_count(SlotSubcommitteeIndex::new(prev_slot, i))
+        {
+            contributor_sum += count;
+        }
+    }
+    drop(contributors);
+    set_gauge_by_usize(&SYNC_COMM_OBSERVATION_PREV_SLOT_SIGNERS, contributor_sum);
+
+    let sync_aggregators = chain.observed_sync_aggregators.read();
+    let mut aggregator_sum = 0;
+    for i in 0..SYNC_COMMITTEE_SUBNET_COUNT {
+        if let Some(count) =
+            sync_aggregators.observed_validator_count(SlotSubcommitteeIndex::new(prev_slot, i))
+        {
+            aggregator_sum += count;
+        }
+    }
+    drop(sync_aggregators);
+    set_gauge_by_usize(&SYNC_COMM_OBSERVATION_PREV_SLOT_AGGREGATORS, aggregator_sum);
 }
 
 fn set_gauge_by_slot(gauge: &Result<IntGauge>, value: Slot) {

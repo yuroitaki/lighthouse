@@ -12,7 +12,7 @@ use tree_hash::TreeHash;
 pub const GRAFFITI_BYTES_LEN: usize = 32;
 
 /// The 32-byte `graffiti` field on a beacon block.
-#[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Hash, Clone, Copy, Serialize, Deserialize)]
 #[serde(transparent)]
 #[cfg_attr(feature = "arbitrary-fuzz", derive(arbitrary::Arbitrary))]
 pub struct Graffiti(#[serde(with = "serde_graffiti")] pub [u8; GRAFFITI_BYTES_LEN]);
@@ -27,7 +27,7 @@ impl Graffiti {
 
 impl fmt::Display for Graffiti {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", serde_utils::hex::encode(&self.0))
+        write!(f, "{}", eth2_serde_utils::hex::encode(&self.0))
     }
 }
 
@@ -74,14 +74,17 @@ impl<'de> Deserialize<'de> for GraffitiString {
 impl Into<Graffiti> for GraffitiString {
     fn into(self) -> Graffiti {
         let graffiti_bytes = self.0.as_bytes();
-        let mut graffiti = [0; 32];
+        let mut graffiti = [0; GRAFFITI_BYTES_LEN];
 
-        let graffiti_len = std::cmp::min(graffiti_bytes.len(), 32);
+        let graffiti_len = std::cmp::min(graffiti_bytes.len(), GRAFFITI_BYTES_LEN);
 
         // Copy the provided bytes over.
         //
         // Panic-free because `graffiti_bytes.len()` <= `GRAFFITI_BYTES_LEN`.
-        graffiti[..graffiti_len].copy_from_slice(&graffiti_bytes);
+        graffiti
+            .get_mut(..graffiti_len)
+            .expect("graffiti_len <= GRAFFITI_BYTES_LEN")
+            .copy_from_slice(graffiti_bytes);
         graffiti.into()
     }
 }
@@ -93,7 +96,7 @@ pub mod serde_graffiti {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&serde_utils::hex::encode(bytes))
+        serializer.serialize_str(&eth2_serde_utils::hex::encode(bytes))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; GRAFFITI_BYTES_LEN], D::Error>
@@ -102,7 +105,7 @@ pub mod serde_graffiti {
     {
         let s: String = Deserialize::deserialize(deserializer)?;
 
-        let bytes = serde_utils::hex::decode(&s).map_err(D::Error::custom)?;
+        let bytes = eth2_serde_utils::hex::decode(&s).map_err(D::Error::custom)?;
 
         if bytes.len() != GRAFFITI_BYTES_LEN {
             return Err(D::Error::custom(format!(

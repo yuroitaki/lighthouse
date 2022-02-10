@@ -110,9 +110,9 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
         &mut self,
         state: &BeaconState<T::EthSpec>,
     ) -> Result<(), BeaconChainError> {
-        if state.validators.len() > self.pubkeys.len() {
+        if state.validators().len() > self.pubkeys.len() {
             self.import(
-                state.validators[self.pubkeys.len()..]
+                state.validators()[self.pubkeys.len()..]
                     .iter()
                     .map(|v| v.pubkey),
             )
@@ -171,6 +171,13 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
     /// Get the public key for a validator with index `i`.
     pub fn get(&self, i: usize) -> Option<&PublicKey> {
         self.pubkeys.get(i)
+    }
+
+    /// Get the `PublicKey` for a validator with `PublicKeyBytes`.
+    pub fn get_pubkey_from_pubkey_bytes(&self, pubkey: &PublicKeyBytes) -> Option<&PublicKey> {
+        self.get_index(pubkey)
+            .map(|index| self.get(index))
+            .flatten()
     }
 
     /// Get the public key (in bytes form) for a validator with index `i`.
@@ -236,8 +243,8 @@ enum Error {
     /// The file read from disk does not have a contiguous list of validator public keys. The file
     /// has become corrupted.
     InconsistentIndex {
-        expected: Option<usize>,
-        found: usize,
+        _expected: Option<usize>,
+        _found: usize,
     },
 }
 
@@ -289,8 +296,8 @@ impl ValidatorPubkeyCacheFile {
                 indices.insert(pubkey, index);
             } else {
                 return Err(Error::InconsistentIndex {
-                    expected,
-                    found: index,
+                    _expected: expected,
+                    _found: index,
                 });
             }
         }
@@ -316,23 +323,28 @@ fn append_to_file(file: &mut File, index: usize, pubkey: &PublicKeyBytes) -> Res
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::{test_logger, EphemeralHarnessType};
+    use crate::test_utils::{BeaconChainHarness, EphemeralHarnessType};
+    use logging::test_logger;
     use std::sync::Arc;
     use store::HotColdDB;
     use tempfile::tempdir;
     use types::{
-        test_utils::{generate_deterministic_keypair, TestingBeaconStateBuilder},
-        BeaconState, EthSpec, Keypair, MainnetEthSpec,
+        test_utils::generate_deterministic_keypair, BeaconState, EthSpec, Keypair, MainnetEthSpec,
     };
 
     type E = MainnetEthSpec;
     type T = EphemeralHarnessType<E>;
 
     fn get_state(validator_count: usize) -> (BeaconState<E>, Vec<Keypair>) {
-        let spec = E::default_spec();
-        let builder =
-            TestingBeaconStateBuilder::from_deterministic_keypairs(validator_count, &spec);
-        builder.build()
+        let harness = BeaconChainHarness::builder(MainnetEthSpec)
+            .default_spec()
+            .deterministic_keypairs(validator_count)
+            .fresh_ephemeral_store()
+            .build();
+
+        harness.advance_slot();
+
+        (harness.get_current_state(), harness.validator_keypairs)
     }
 
     fn get_store() -> BeaconStore<T> {

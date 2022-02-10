@@ -6,15 +6,19 @@ use eth1::{DEFAULT_CHAIN_ID, DEFAULT_NETWORK_ID};
 use eth1_test_rig::GanacheEth1Instance;
 use futures::prelude::*;
 use node_test_rig::{
-    environment::EnvironmentBuilder, testing_client_config, testing_validator_config,
-    ClientGenesis, ValidatorFiles,
+    environment::{EnvironmentBuilder, LoggerConfig},
+    testing_client_config, testing_validator_config, ClientGenesis, ValidatorFiles,
 };
 use rayon::prelude::*;
+use sensitive_url::SensitiveUrl;
 use std::cmp::max;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::sleep;
-use types::{Epoch, EthSpec, MainnetEthSpec};
+use types::{Epoch, EthSpec, MinimalEthSpec};
+
+const FORK_EPOCH: u64 = 2;
+const END_EPOCH: u64 = 16;
 
 pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
     let node_count = value_t!(matches, "nodes", usize).expect("missing nodes default");
@@ -49,7 +53,15 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
     let log_format = None;
 
     let mut env = EnvironmentBuilder::minimal()
-        .async_logger(log_level, log_format)?
+        .initialize_logger(LoggerConfig {
+            path: None,
+            debug_level: log_level,
+            logfile_debug_level: "debug",
+            log_format,
+            max_log_size: 0,
+            max_log_number: 0,
+            compression: false,
+        })?
         .multi_threaded_tokio_runtime()?
         .build()?;
 
@@ -58,6 +70,7 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
     let spec = &mut env.eth2_config.spec;
 
     let total_validator_count = validators_per_node * node_count;
+    let altair_fork_version = spec.altair_fork_version;
 
     spec.seconds_per_slot /= speed_up_factor;
     spec.seconds_per_slot = max(1, spec.seconds_per_slot);
@@ -65,7 +78,8 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
     spec.genesis_delay = eth1_block_time.as_secs() * spec.eth1_follow_distance * 2;
     spec.min_genesis_time = 0;
     spec.min_genesis_active_validator_count = total_validator_count as u64;
-    spec.seconds_per_eth1_block = 1;
+    spec.seconds_per_eth1_block = eth1_block_time.as_secs();
+    spec.altair_fork_epoch = Some(Epoch::new(FORK_EPOCH));
 
     let slot_duration = Duration::from_secs(spec.seconds_per_slot);
     let initial_validator_count = spec.min_genesis_active_validator_count as usize;
@@ -84,7 +98,8 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
         let network_id = ganache_eth1_instance.ganache.network_id();
         let chain_id = ganache_eth1_instance.ganache.chain_id();
         let ganache = ganache_eth1_instance.ganache;
-        let eth1_endpoint = ganache.endpoint();
+        let eth1_endpoint = SensitiveUrl::parse(ganache.endpoint().as_str())
+            .expect("Unable to parse ganache endpoint.");
         let deposit_contract_address = deposit_contract.address();
 
         // Start a timer that produces eth1 blocks on an interval.
@@ -117,8 +132,10 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
         beacon_config.eth1.node_far_behind_seconds = 20;
         beacon_config.dummy_eth1_backend = false;
         beacon_config.sync_eth1_chain = true;
+        beacon_config.eth1.auto_update_interval_millis = eth1_block_time.as_millis() as u64;
         beacon_config.eth1.network_id = Eth1Id::from(network_id);
         beacon_config.eth1.chain_id = Eth1Id::from(chain_id);
+        beacon_config.network.target_peers = node_count - 1;
 
         beacon_config.network.enr_address = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
@@ -133,7 +150,10 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
         for i in 0..node_count - 1 {
             let mut config = beacon_config.clone();
             if i % 2 == 0 {
-                config.eth1.endpoints.insert(0, INVALID_ADDRESS.to_string());
+                config.eth1.endpoints.insert(
+                    0,
+                    SensitiveUrl::parse(INVALID_ADDRESS).expect("Unable to parse invalid address"),
+                );
             }
             network.add_beacon_node(config).await?;
         }
@@ -169,13 +189,13 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
          * tests start at the right time. Whilst this is works well for now, it's subject to
          * breakage by changes to the VC.
          */
-        let (finalization, block_prod, validator_count, onboarding) = futures::join!(
+        let (finalization, block_prod, validator_count, onboarding, fork, sync_aggregate) = futures::join!(
             // Check that the chain finalizes at the first given opportunity.
             checks::verify_first_finalization(network.clone(), slot_duration),
             // Check that a block is produced at every slot.
             checks::verify_full_block_production_up_to(
                 network.clone(),
-                Epoch::new(4).start_slot(MainnetEthSpec::slots_per_epoch()),
+                Epoch::new(END_EPOCH).start_slot(MinimalEthSpec::slots_per_epoch()),
                 slot_duration,
             ),
             // Check that the chain starts with the expected validator count.
@@ -190,6 +210,22 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
                 network.clone(),
                 slot_duration,
                 total_validator_count,
+            ),
+            // Check that all nodes have transitioned to the new fork.
+            checks::verify_fork_version(
+                network.clone(),
+                Epoch::new(FORK_EPOCH),
+                slot_duration,
+                altair_fork_version
+            ),
+            // Check that all sync aggregates are full.
+            checks::verify_full_sync_aggregates_up_to(
+                network.clone(),
+                // Start checking for sync_aggregates at `FORK_EPOCH + 1` to account for
+                // inefficiencies in finding subnet peers at the `fork_slot`.
+                Epoch::new(FORK_EPOCH + 1).start_slot(MinimalEthSpec::slots_per_epoch()),
+                Epoch::new(END_EPOCH).start_slot(MinimalEthSpec::slots_per_epoch()),
+                slot_duration,
             )
         );
 
@@ -197,6 +233,8 @@ pub fn run_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
         finalization?;
         validator_count?;
         onboarding?;
+        fork?;
+        sync_aggregate?;
 
         // The `final_future` either completes immediately or never completes, depending on the value
         // of `continue_after_checks`.

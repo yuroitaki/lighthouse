@@ -1,7 +1,8 @@
 use super::*;
 use core::num::NonZeroUsize;
-use ethereum_types::{H256, U128, U256};
+use ethereum_types::{H160, H256, U128, U256};
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 macro_rules! impl_decodable_for_uint {
     ($type: ident, $bit_size: expr) => {
@@ -241,32 +242,37 @@ impl Decode for NonZeroUsize {
     }
 }
 
-/// The SSZ union type.
-impl<T: Decode> Decode for Option<T> {
+impl<T: Decode> Decode for Arc<T> {
     fn is_ssz_fixed_len() -> bool {
-        false
+        T::is_ssz_fixed_len()
+    }
+
+    fn ssz_fixed_len() -> usize {
+        T::ssz_fixed_len()
     }
 
     fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        if bytes.len() < BYTES_PER_LENGTH_OFFSET {
-            return Err(DecodeError::InvalidByteLength {
-                len: bytes.len(),
-                expected: BYTES_PER_LENGTH_OFFSET,
-            });
-        }
+        T::from_ssz_bytes(bytes).map(Arc::new)
+    }
+}
 
-        let (index_bytes, value_bytes) = bytes.split_at(BYTES_PER_LENGTH_OFFSET);
+impl Decode for H160 {
+    fn is_ssz_fixed_len() -> bool {
+        true
+    }
 
-        let index = read_union_index(index_bytes)?;
-        if index == 0 {
-            Ok(None)
-        } else if index == 1 {
-            Ok(Some(T::from_ssz_bytes(value_bytes)?))
+    fn ssz_fixed_len() -> usize {
+        20
+    }
+
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let len = bytes.len();
+        let expected = <Self as Decode>::ssz_fixed_len();
+
+        if len != expected {
+            Err(DecodeError::InvalidByteLength { len, expected })
         } else {
-            Err(DecodeError::BytesInvalid(format!(
-                "{} is not a valid union index for Option<T>",
-                index
-            )))
+            Ok(Self::from_slice(bytes))
         }
     }
 }
@@ -353,7 +359,7 @@ macro_rules! impl_decodable_for_u8_array {
                     Err(DecodeError::InvalidByteLength { len, expected })
                 } else {
                     let mut array: [u8; $len] = [0; $len];
-                    array.copy_from_slice(&bytes[..]);
+                    array.copy_from_slice(bytes);
 
                     Ok(array)
                 }

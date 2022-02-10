@@ -16,7 +16,7 @@ use tree_hash_derive::TreeHash;
 )]
 pub struct BeaconBlockHeader {
     pub slot: Slot,
-    #[serde(with = "serde_utils::quoted_u64")]
+    #[serde(with = "eth2_serde_utils::quoted_u64")]
     pub proposer_index: u64,
     pub parent_root: Hash256,
     pub state_root: Hash256,
@@ -31,19 +31,6 @@ impl BeaconBlockHeader {
     /// Spec v0.12.1
     pub fn canonical_root(&self) -> Hash256 {
         Hash256::from_slice(&self.tree_hash_root()[..])
-    }
-
-    /// Given a `body`, consumes `self` and returns a complete `BeaconBlock`.
-    ///
-    /// Spec v0.12.1
-    pub fn into_block<T: EthSpec>(self, body: BeaconBlockBody<T>) -> BeaconBlock<T> {
-        BeaconBlock {
-            slot: self.slot,
-            proposer_index: self.proposer_index,
-            parent_root: self.parent_root,
-            state_root: self.state_root,
-            body,
-        }
     }
 
     /// Signs `self`, producing a `SignedBeaconBlockHeader`.

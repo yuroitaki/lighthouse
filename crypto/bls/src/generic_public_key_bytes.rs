@@ -2,9 +2,9 @@ use crate::{
     generic_public_key::{GenericPublicKey, TPublicKey},
     Error, PUBLIC_KEY_BYTES_LEN,
 };
+use eth2_serde_utils::hex::encode as hex_encode;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::encode as hex_encode;
 use ssz::{Decode, Encode};
 use std::convert::TryInto;
 use std::fmt;
@@ -70,7 +70,7 @@ impl<Pub> GenericPublicKeyBytes<Pub> {
     }
 
     /// Returns `self.serialize()` as a `0x`-prefixed hex string.
-    pub fn to_hex_string(&self) -> String {
+    pub fn as_hex_string(&self) -> String {
         format!("{:?}", self)
     }
 
@@ -177,6 +177,6 @@ impl<Pub> fmt::Debug for GenericPublicKeyBytes<Pub> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<Pub: 'static> arbitrary::Arbitrary for GenericPublicKeyBytes<Pub> {
+impl<Pub: 'static> arbitrary::Arbitrary<'_> for GenericPublicKeyBytes<Pub> {
     impl_arbitrary!(PUBLIC_KEY_BYTES_LEN);
 }

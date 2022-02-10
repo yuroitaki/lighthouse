@@ -1,10 +1,10 @@
 # Redundancy
 
-[subscribe-api]: https://ethereum.github.io/eth2.0-APIs/#/Validator/prepareBeaconCommitteeSubnet
+[subscribe-api]: https://ethereum.github.io/beacon-APIs/#/Validator/prepareBeaconCommitteeSubnet
 
 There are three places in Lighthouse where redundancy is notable:
 
-1. ✅ GOOD: Using a redundant Beacon node in `lighthouse bn --beacon-nodes`
+1. ✅ GOOD: Using a redundant Beacon node in `lighthouse vc --beacon-nodes`
 1. ✅ GOOD: Using a redundant Eth1 node in `lighthouse bn --eth1-endpoints`
 1. ☠️ BAD: Running redundant `lighthouse vc` instances with overlapping keypairs.
 
@@ -18,7 +18,9 @@ From this paragraph, this document will *only* refer to the first two items (1, 
 
 ## Redundant Beacon Nodes
 
-The `lighthouse bn --beacon-nodes` flag allows one or more comma-separated values:
+The Lighthouse validator client can be configured to use multiple redundant beacon nodes.
+
+The `lighthouse vc --beacon-nodes` flag allows one or more comma-separated values:
 
 1. `lighthouse vc --beacon-nodes http://localhost:5052`
 1. `lighthouse vc --beacon-nodes http://localhost:5052,http://192.168.1.1:5052`
@@ -26,7 +28,7 @@ The `lighthouse bn --beacon-nodes` flag allows one or more comma-separated value
 In the first example, the validator client will attempt to contact
 `http://localhost:5052` to perform duties. If that node is not contactable, not
 synced or unable to serve the request then the validator client may fail to
-perform some duty (e.g., produce a block or attest).
+perform some duty (e.g. produce a block or attest).
 
 However, in the second example, any failure on `http://localhost:5052` will be
 followed by a second attempt using `http://192.168.1.1:5052`. This
@@ -59,7 +61,7 @@ following flags:
 	`5052`). This is only required if your backup node is on a different host.
 - `--subscribe-all-subnets`: ensures that the beacon node subscribes to *all*
 	subnets, not just on-demand requests from validators.
-- `--process-all-attestations`: ensures that the beacon node performs
+- `--import-all-attestations`: ensures that the beacon node performs
 	aggregation on all seen attestations.
 
 Subsequently, one could use the following command to provide a backup beacon
@@ -70,12 +72,12 @@ lighthouse bn \
   --staking \
   --http-address 0.0.0.0 \
   --subscribe-all-subnets \
-  --process-all-attestations
+  --import-all-attestations
 ```
 
 ### Resource usage of redundant Beacon Nodes
 
-The `--subscribe-all-subnets` and `--process-all-attestations` flags typically
+The `--subscribe-all-subnets` and `--import-all-attestations` flags typically
 cause a significant increase in resource consumption. A doubling in CPU
 utilization and RAM consumption is expected.
 
@@ -84,7 +86,7 @@ now processing, validating, aggregating and forwarding *all* attestations,
 whereas previously it was likely only doing a fraction of this work. Without
 these flags, subscription to attestation subnets and aggregation of
 attestations is only performed for validators which [explicitly request
-subscriptions](subscribe-api).
+subscriptions][subscribe-api].
 
 There are 64 subnets and each validator will result in a subscription to *at
 least* one subnet. So, using the two aforementioned flags will result in

@@ -1,13 +1,17 @@
-use super::{
-    AggregateSignature, AttestationData, BitList, ChainSpec, Domain, EthSpec, Fork, SecretKey,
-    SignedRoot,
-};
-use crate::{test_utils::TestRandom, Hash256};
+use derivative::Derivative;
 use safe_arith::ArithError;
 use serde_derive::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
 use tree_hash_derive::TreeHash;
+
+use crate::slot_data::SlotData;
+use crate::{test_utils::TestRandom, Hash256, Slot};
+
+use super::{
+    AggregateSignature, AttestationData, BitList, ChainSpec, Domain, EthSpec, Fork, SecretKey,
+    Signature, SignedRoot,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -20,7 +24,10 @@ pub enum Error {
 ///
 /// Spec v0.12.1
 #[cfg_attr(feature = "arbitrary-fuzz", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom, Derivative,
+)]
+#[derivative(PartialEq, Hash(bound = "T: EthSpec"))]
 #[serde(bound = "T: EthSpec")]
 pub struct Attestation<T: EthSpec> {
     pub aggregation_bits: BitList<T::MaxValidatorsPerCommittee>,
@@ -58,6 +65,25 @@ impl<T: EthSpec> Attestation<T> {
         genesis_validators_root: Hash256,
         spec: &ChainSpec,
     ) -> Result<(), Error> {
+        let domain = spec.get_domain(
+            self.data.target.epoch,
+            Domain::BeaconAttester,
+            fork,
+            genesis_validators_root,
+        );
+        let message = self.data.signing_root(domain);
+
+        self.add_signature(&secret_key.sign(message), committee_position)
+    }
+
+    /// Adds `signature` to `self` and sets the `committee_position`'th bit of `aggregation_bits` to `true`.
+    ///
+    /// Returns an `AlreadySigned` error if the `committee_position`'th bit is already `true`.
+    pub fn add_signature(
+        &mut self,
+        signature: &Signature,
+        committee_position: usize,
+    ) -> Result<(), Error> {
         if self
             .aggregation_bits
             .get(committee_position)
@@ -69,25 +95,24 @@ impl<T: EthSpec> Attestation<T> {
                 .set(committee_position, true)
                 .map_err(Error::SszTypesError)?;
 
-            let domain = spec.get_domain(
-                self.data.target.epoch,
-                Domain::BeaconAttester,
-                fork,
-                genesis_validators_root,
-            );
-            let message = self.data.signing_root(domain);
-
-            self.signature.add_assign(&secret_key.sign(message));
+            self.signature.add_assign(signature);
 
             Ok(())
         }
     }
 }
 
+impl<T: EthSpec> SlotData for Attestation<T> {
+    fn get_slot(&self) -> Slot {
+        self.data.slot
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::*;
+
+    use super::*;
 
     ssz_and_tree_hash_tests!(Attestation<MainnetEthSpec>);
 }

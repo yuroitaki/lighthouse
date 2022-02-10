@@ -7,7 +7,7 @@ use crate::http_metrics::metrics::{inc_counter_vec, ENDPOINT_ERRORS, ENDPOINT_RE
 use environment::RuntimeContext;
 use eth2::BeaconNodeHttpClient;
 use futures::future;
-use slog::{error, info, warn, Logger};
+use slog::{debug, error, info, warn, Logger};
 use slot_clock::SlotClock;
 use std::fmt;
 use std::fmt::Debug;
@@ -209,7 +209,7 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
 
     /// Checks if the node has the correct specification.
     async fn is_compatible(&self, spec: &ChainSpec, log: &Logger) -> Result<(), CandidateError> {
-        let yaml_config = self
+        let config_and_preset = self
             .beacon_node
             .get_config_spec()
             .await
@@ -224,9 +224,8 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
             })?
             .data;
 
-        let beacon_node_spec = yaml_config
-            .apply_to_chain_spec::<E>(&E::default_spec())
-            .ok_or_else(|| {
+        let beacon_node_spec =
+            ChainSpec::from_config::<E>(&config_and_preset.config).ok_or_else(|| {
                 error!(
                     log,
                     "The minimal/mainnet spec type of the beacon node does not match the validator \
@@ -236,17 +235,41 @@ impl<E: EthSpec> CandidateBeaconNode<E> {
                 CandidateError::Incompatible
             })?;
 
-        if *spec == beacon_node_spec {
-            Ok(())
-        } else {
+        if !config_and_preset.extra_fields.is_empty() {
+            debug!(
+                log,
+                "Beacon spec includes unknown fields";
+                "endpoint" => %self.beacon_node,
+                "fields" => ?config_and_preset.extra_fields,
+            );
+        }
+
+        if beacon_node_spec.genesis_fork_version != spec.genesis_fork_version {
             error!(
                 log,
-                "The beacon node is using a different Eth2 specification to this validator client. \
-                See the --network command.";
+                "Beacon node is configured for a different network";
                 "endpoint" => %self.beacon_node,
+                "bn_genesis_fork" => ?beacon_node_spec.genesis_fork_version,
+                "our_genesis_fork" => ?spec.genesis_fork_version,
             );
-            Err(CandidateError::Incompatible)
+            return Err(CandidateError::Incompatible);
+        } else if beacon_node_spec.altair_fork_epoch != spec.altair_fork_epoch {
+            warn!(
+                log,
+                "Beacon node has mismatched Altair fork epoch";
+                "endpoint" => %self.beacon_node,
+                "endpoint_altair_fork_epoch" => ?beacon_node_spec.altair_fork_epoch,
+            );
+        } else if beacon_node_spec.bellatrix_fork_epoch != spec.bellatrix_fork_epoch {
+            warn!(
+                log,
+                "Beacon node has mismatched Bellatrix fork epoch";
+                "endpoint" => %self.beacon_node,
+                "endpoint_bellatrix_fork_epoch" => ?beacon_node_spec.bellatrix_fork_epoch,
+            );
         }
+
+        Ok(())
     }
 
     /// Checks if the beacon node is synced.
@@ -294,7 +317,7 @@ impl<T: SlotClock, E: EthSpec> BeaconNodeFallback<T, E> {
     }
 
     /// The count of candidates, regardless of their state.
-    pub async fn num_total(&self) -> usize {
+    pub fn num_total(&self) -> usize {
         self.candidates.len()
     }
 
@@ -302,6 +325,17 @@ impl<T: SlotClock, E: EthSpec> BeaconNodeFallback<T, E> {
     pub async fn num_synced(&self) -> usize {
         let mut n = 0;
         for candidate in &self.candidates {
+            if candidate.status(RequireSynced::Yes).await.is_ok() {
+                n += 1
+            }
+        }
+        n
+    }
+
+    /// The count of synced and ready fallbacks excluding the primary beacon node candidate.
+    pub async fn num_synced_fallback(&self) -> usize {
+        let mut n = 0;
+        for candidate in self.candidates.iter().skip(1) {
             if candidate.status(RequireSynced::Yes).await.is_ok() {
                 n += 1
             }
@@ -336,7 +370,7 @@ impl<T: SlotClock, E: EthSpec> BeaconNodeFallback<T, E> {
             // status of nodes that were previously not-synced.
             if candidate.status(RequireSynced::Yes).await.is_err() {
                 // There exists a race-condition that could result in `refresh_status` being called
-                // when the status does not require refreshing anymore. This deemed is an
+                // when the status does not require refreshing anymore. This is deemed an
                 // acceptable inefficiency.
                 futures.push(candidate.refresh_status(
                     self.slot_clock.as_ref(),

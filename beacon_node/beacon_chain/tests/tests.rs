@@ -1,20 +1,18 @@
 #![cfg(not(debug_assertions))]
 
-#[macro_use]
-extern crate lazy_static;
-
 use beacon_chain::{
     attestation_verification::Error as AttnError,
     test_utils::{
         AttestationStrategy, BeaconChainHarness, BlockStrategy, EphemeralHarnessType,
         OP_POOL_DB_KEY,
     },
+    StateSkipConfig, WhenSlotSkipped,
 };
+use lazy_static::lazy_static;
 use operation_pool::PersistedOperationPool;
 use state_processing::{
     per_slot_processing, per_slot_processing::Error as SlotProcessingError, EpochProcessingError,
 };
-use store::config::StoreConfig;
 use types::{BeaconStateError, EthSpec, Hash256, Keypair, MinimalEthSpec, RelativeEpoch, Slot};
 
 // Should ideally be divisible by 3.
@@ -26,11 +24,11 @@ lazy_static! {
 }
 
 fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessType<MinimalEthSpec>> {
-    let harness = BeaconChainHarness::new_with_store_config(
-        MinimalEthSpec,
-        KEYPAIRS[0..validator_count].to_vec(),
-        StoreConfig::default(),
-    );
+    let harness = BeaconChainHarness::builder(MinimalEthSpec)
+        .default_spec()
+        .keypairs(KEYPAIRS[0..validator_count].to_vec())
+        .fresh_ephemeral_store()
+        .build();
 
     harness.advance_slot();
 
@@ -40,7 +38,7 @@ fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessTyp
 #[test]
 fn massive_skips() {
     let harness = get_harness(8);
-    let spec = &MinimalEthSpec::default_spec();
+    let spec = &harness.chain.spec;
     let mut state = harness.chain.head().expect("should get head").beacon_state;
 
     // Run per_slot_processing until it returns an error.
@@ -51,7 +49,7 @@ fn massive_skips() {
         }
     };
 
-    assert!(state.slot > 1, "the state should skip at least one slot");
+    assert!(state.slot() > 1, "the state should skip at least one slot");
     assert_eq!(
         error,
         SlotProcessingError::EpochProcessingError(EpochProcessingError::BeaconStateError(
@@ -76,13 +74,13 @@ fn iterators() {
 
     let block_roots: Vec<(Hash256, Slot)> = harness
         .chain
-        .rev_iter_block_roots()
+        .forwards_iter_block_roots(Slot::new(0))
         .expect("should get iter")
         .map(Result::unwrap)
         .collect();
     let state_roots: Vec<(Hash256, Slot)> = harness
         .chain
-        .rev_iter_state_roots()
+        .forwards_iter_state_roots(Slot::new(0))
         .expect("should get iter")
         .map(Result::unwrap)
         .collect();
@@ -111,30 +109,95 @@ fn iterators() {
     block_roots.windows(2).for_each(|x| {
         assert_eq!(
             x[1].1,
-            x[0].1 - 1,
-            "block root slots should be decreasing by one"
+            x[0].1 + 1,
+            "block root slots should be increasing by one"
         )
     });
     state_roots.windows(2).for_each(|x| {
         assert_eq!(
             x[1].1,
-            x[0].1 - 1,
-            "state root slots should be decreasing by one"
+            x[0].1 + 1,
+            "state root slots should be increasing by one"
         )
     });
 
     let head = &harness.chain.head().expect("should get head");
 
     assert_eq!(
-        *block_roots.first().expect("should have some block roots"),
+        *block_roots.last().expect("should have some block roots"),
         (head.beacon_block_root, head.beacon_block.slot()),
-        "first block root and slot should be for the head block"
+        "last block root and slot should be for the head block"
     );
 
     assert_eq!(
-        *state_roots.first().expect("should have some state roots"),
-        (head.beacon_state_root(), head.beacon_state.slot),
-        "first state root and slot should be for the head state"
+        *state_roots.last().expect("should have some state roots"),
+        (head.beacon_state_root(), head.beacon_state.slot()),
+        "last state root and slot should be for the head state"
+    );
+}
+
+#[test]
+fn find_reorgs() {
+    let num_blocks_produced = MinimalEthSpec::slots_per_historical_root() + 1;
+
+    let harness = get_harness(VALIDATOR_COUNT);
+
+    harness.extend_chain(
+        num_blocks_produced as usize,
+        BlockStrategy::OnCanonicalHead,
+        // No need to produce attestations for this test.
+        AttestationStrategy::SomeValidators(vec![]),
+    );
+
+    let head_state = harness.chain.head_beacon_state().unwrap();
+    let head_slot = head_state.slot();
+    let genesis_state = harness
+        .chain
+        .state_at_slot(Slot::new(0), StateSkipConfig::WithStateRoots)
+        .unwrap();
+
+    // because genesis is more than `SLOTS_PER_HISTORICAL_ROOT` away, this should return with the
+    // finalized slot.
+    assert_eq!(
+        harness
+            .chain
+            .find_reorg_slot(&genesis_state, harness.chain.genesis_block_root)
+            .unwrap(),
+        head_state
+            .finalized_checkpoint()
+            .epoch
+            .start_slot(MinimalEthSpec::slots_per_epoch())
+    );
+
+    // test head
+    assert_eq!(
+        harness
+            .chain
+            .find_reorg_slot(
+                &head_state,
+                harness.chain.head_beacon_block().unwrap().canonical_root()
+            )
+            .unwrap(),
+        head_slot
+    );
+
+    // Re-org back to the slot prior to the head.
+    let prev_slot = head_slot - Slot::new(1);
+    let prev_state = harness
+        .chain
+        .state_at_slot(prev_slot, StateSkipConfig::WithStateRoots)
+        .unwrap();
+    let prev_block_root = harness
+        .chain
+        .block_root_at_slot(prev_slot, WhenSlotSkipped::None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        harness
+            .chain
+            .find_reorg_slot(&prev_state, prev_block_root)
+            .unwrap(),
+        prev_slot
     );
 }
 
@@ -171,7 +234,7 @@ fn chooses_fork() {
     let state = &harness.chain.head().expect("should get head").beacon_state;
 
     assert_eq!(
-        state.slot,
+        state.slot(),
         Slot::from(initial_blocks + honest_fork_blocks),
         "head should be at the current slot"
     );
@@ -202,7 +265,8 @@ fn finalizes_with_full_participation() {
     let state = &harness.chain.head().expect("should get head").beacon_state;
 
     assert_eq!(
-        state.slot, num_blocks_produced,
+        state.slot(),
+        num_blocks_produced,
         "head should be at the current slot"
     );
     assert_eq!(
@@ -211,12 +275,12 @@ fn finalizes_with_full_participation() {
         "head should be at the expected epoch"
     );
     assert_eq!(
-        state.current_justified_checkpoint.epoch,
+        state.current_justified_checkpoint().epoch,
         state.current_epoch() - 1,
         "the head should be justified one behind the current epoch"
     );
     assert_eq!(
-        state.finalized_checkpoint.epoch,
+        state.finalized_checkpoint().epoch,
         state.current_epoch() - 2,
         "the head should be finalized two behind the current epoch"
     );
@@ -240,7 +304,8 @@ fn finalizes_with_two_thirds_participation() {
     let state = &harness.chain.head().expect("should get head").beacon_state;
 
     assert_eq!(
-        state.slot, num_blocks_produced,
+        state.slot(),
+        num_blocks_produced,
         "head should be at the current slot"
     );
     assert_eq!(
@@ -254,12 +319,12 @@ fn finalizes_with_two_thirds_participation() {
     // included in blocks during that epoch.
 
     assert_eq!(
-        state.current_justified_checkpoint.epoch,
+        state.current_justified_checkpoint().epoch,
         state.current_epoch() - 2,
         "the head should be justified two behind the current epoch"
     );
     assert_eq!(
-        state.finalized_checkpoint.epoch,
+        state.finalized_checkpoint().epoch,
         state.current_epoch() - 4,
         "the head should be finalized three behind the current epoch"
     );
@@ -284,7 +349,8 @@ fn does_not_finalize_with_less_than_two_thirds_participation() {
     let state = &harness.chain.head().expect("should get head").beacon_state;
 
     assert_eq!(
-        state.slot, num_blocks_produced,
+        state.slot(),
+        num_blocks_produced,
         "head should be at the current slot"
     );
     assert_eq!(
@@ -293,11 +359,13 @@ fn does_not_finalize_with_less_than_two_thirds_participation() {
         "head should be at the expected epoch"
     );
     assert_eq!(
-        state.current_justified_checkpoint.epoch, 0,
+        state.current_justified_checkpoint().epoch,
+        0,
         "no epoch should have been justified"
     );
     assert_eq!(
-        state.finalized_checkpoint.epoch, 0,
+        state.finalized_checkpoint().epoch,
+        0,
         "no epoch should have been finalized"
     );
 }
@@ -317,7 +385,8 @@ fn does_not_finalize_without_attestation() {
     let state = &harness.chain.head().expect("should get head").beacon_state;
 
     assert_eq!(
-        state.slot, num_blocks_produced,
+        state.slot(),
+        num_blocks_produced,
         "head should be at the current slot"
     );
     assert_eq!(
@@ -326,11 +395,13 @@ fn does_not_finalize_without_attestation() {
         "head should be at the expected epoch"
     );
     assert_eq!(
-        state.current_justified_checkpoint.epoch, 0,
+        state.current_justified_checkpoint().epoch,
+        0,
         "no epoch should have been justified"
     );
     assert_eq!(
-        state.finalized_checkpoint.epoch, 0,
+        state.finalized_checkpoint().epoch,
+        0,
         "no epoch should have been finalized"
     );
 }
@@ -361,7 +432,8 @@ fn roundtrip_operation_pool() {
         .get_item::<PersistedOperationPool<MinimalEthSpec>>(&OP_POOL_DB_KEY)
         .expect("should read db")
         .expect("should find op pool")
-        .into_operation_pool();
+        .into_operation_pool()
+        .unwrap();
 
     assert_eq!(harness.chain.op_pool, restored_op_pool);
 }
@@ -453,7 +525,7 @@ fn attestations_with_increasing_slots() {
     for (attestation, subnet_id) in attestations.into_iter().flatten() {
         let res = harness
             .chain
-            .verify_unaggregated_attestation_for_gossip(attestation.clone(), Some(subnet_id));
+            .verify_unaggregated_attestation_for_gossip(&attestation, Some(subnet_id));
 
         let current_slot = harness.chain.slot().expect("should get slot");
         let expected_attestation_slot = attestation.data.slot;
@@ -608,4 +680,155 @@ fn produces_and_processes_with_genesis_skip_slots() {
     for i in 0..MinimalEthSpec::slots_per_epoch() * 4 {
         run_skip_slot_test(i)
     }
+}
+
+#[test]
+fn block_roots_skip_slot_behaviour() {
+    let harness = get_harness(VALIDATOR_COUNT);
+
+    // Test should be longer than the block roots to ensure a DB lookup is triggered.
+    let chain_length = harness
+        .chain
+        .head()
+        .unwrap()
+        .beacon_state
+        .block_roots()
+        .len() as u64
+        * 3;
+
+    let skipped_slots = [1, 6, 7, 10, chain_length];
+
+    // Build a chain with some skip slots.
+    for i in 1..=chain_length {
+        if i > 1 {
+            harness.advance_slot();
+        }
+
+        let slot = harness.chain.slot().unwrap().as_u64();
+
+        if !skipped_slots.contains(&slot) {
+            harness.extend_chain(
+                1,
+                BlockStrategy::OnCanonicalHead,
+                AttestationStrategy::AllValidators,
+            );
+        }
+    }
+
+    let mut prev_unskipped_root = None;
+
+    for target_slot in 0..=chain_length {
+        if skipped_slots.contains(&target_slot) {
+            /*
+             * A skip slot
+             */
+            assert!(
+                harness
+                    .chain
+                    .block_root_at_slot(target_slot.into(), WhenSlotSkipped::None)
+                    .unwrap()
+                    .is_none(),
+                "WhenSlotSkipped::None should return None on a skip slot"
+            );
+
+            let skipped_root = harness
+                .chain
+                .block_root_at_slot(target_slot.into(), WhenSlotSkipped::Prev)
+                .unwrap()
+                .expect("WhenSlotSkipped::Prev should always return Some");
+
+            assert_eq!(
+                skipped_root,
+                prev_unskipped_root.expect("test is badly formed"),
+                "WhenSlotSkipped::Prev should accurately return the prior skipped block"
+            );
+
+            let expected_block = harness.chain.get_block(&skipped_root).unwrap().unwrap();
+
+            assert_eq!(
+                harness
+                    .chain
+                    .block_at_slot(target_slot.into(), WhenSlotSkipped::Prev)
+                    .unwrap()
+                    .unwrap(),
+                expected_block,
+            );
+
+            assert!(
+                harness
+                    .chain
+                    .block_at_slot(target_slot.into(), WhenSlotSkipped::None)
+                    .unwrap()
+                    .is_none(),
+                "WhenSlotSkipped::None should return None on a skip slot"
+            );
+        } else {
+            /*
+             * Not a skip slot
+             */
+            let skips_none = harness
+                .chain
+                .block_root_at_slot(target_slot.into(), WhenSlotSkipped::None)
+                .unwrap()
+                .expect("WhenSlotSkipped::None should return Some for non-skipped block");
+            let skips_prev = harness
+                .chain
+                .block_root_at_slot(target_slot.into(), WhenSlotSkipped::Prev)
+                .unwrap()
+                .expect("WhenSlotSkipped::Prev should always return Some");
+            assert_eq!(
+                skips_none, skips_prev,
+                "WhenSlotSkipped::None and WhenSlotSkipped::Prev should be equal on non-skipped slot"
+            );
+
+            let expected_block = harness.chain.get_block(&skips_prev).unwrap().unwrap();
+
+            assert_eq!(
+                harness
+                    .chain
+                    .block_at_slot(target_slot.into(), WhenSlotSkipped::Prev)
+                    .unwrap()
+                    .unwrap(),
+                expected_block
+            );
+
+            assert_eq!(
+                harness
+                    .chain
+                    .block_at_slot(target_slot.into(), WhenSlotSkipped::None)
+                    .unwrap()
+                    .unwrap(),
+                expected_block
+            );
+
+            prev_unskipped_root = Some(skips_prev);
+        }
+    }
+
+    /*
+     * A future, non-existent slot.
+     */
+
+    let future_slot = harness.chain.slot().unwrap() + 1;
+    assert_eq!(
+        harness.chain.head().unwrap().beacon_block.slot(),
+        future_slot - 2,
+        "test precondition"
+    );
+    assert!(
+        harness
+            .chain
+            .block_root_at_slot(future_slot, WhenSlotSkipped::None)
+            .unwrap()
+            .is_none(),
+        "WhenSlotSkipped::None should return None on a future slot"
+    );
+    assert!(
+        harness
+            .chain
+            .block_root_at_slot(future_slot, WhenSlotSkipped::Prev)
+            .unwrap()
+            .is_none(),
+        "WhenSlotSkipped::Prev should return None on a future slot"
+    );
 }

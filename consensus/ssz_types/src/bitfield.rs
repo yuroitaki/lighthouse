@@ -1,9 +1,10 @@
 use crate::tree_hash::bitfield_bytes_tree_hash_root;
 use crate::Error;
 use core::marker::PhantomData;
+use derivative::Derivative;
+use eth2_serde_utils::hex::{encode as hex_encode, PrefixedHexVisitor};
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
-use serde_utils::hex::{encode as hex_encode, PrefixedHexVisitor};
 use ssz::{Decode, Encode};
 use tree_hash::Hash256;
 use typenum::Unsigned;
@@ -87,7 +88,8 @@ pub type BitVector<N> = Bitfield<Fixed<N>>;
 /// The internal representation of the bitfield is the same as that required by SSZ. The lowest
 /// byte (by `Vec` index) stores the lowest bit-indices and the right-most bit stores the lowest
 /// bit-index. E.g., `vec![0b0000_0001, 0b0000_0010]` has bits `0, 9` set.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Derivative)]
+#[derivative(PartialEq, Hash(bound = ""))]
 pub struct Bitfield<T> {
     bytes: Vec<u8>,
     len: usize,
@@ -266,6 +268,32 @@ impl<N: Unsigned + Clone> Bitfield<Fixed<N>> {
     /// Returns `None` if `bytes` are not a valid encoding.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, Error> {
         Self::from_raw_bytes(bytes, Self::capacity())
+    }
+
+    /// Compute the intersection of two fixed-length `Bitfield`s.
+    ///
+    /// Return a new fixed-length `Bitfield`.
+    pub fn intersection(&self, other: &Self) -> Self {
+        let mut result = Self::new();
+        // Bitwise-and the bytes together, starting from the left of each vector. This takes care
+        // of masking out any entries beyond `min_len` as well, assuming the bitfield doesn't
+        // contain any set bits beyond its length.
+        for i in 0..result.bytes.len() {
+            result.bytes[i] = self.bytes[i] & other.bytes[i];
+        }
+        result
+    }
+
+    /// Compute the union of two fixed-length `Bitfield`s.
+    ///
+    /// Return a new fixed-length `Bitfield`.
+    pub fn union(&self, other: &Self) -> Self {
+        let mut result = Self::new();
+        for i in 0..result.bytes.len() {
+            result.bytes[i] =
+                self.bytes.get(i).copied().unwrap_or(0) | other.bytes.get(i).copied().unwrap_or(0);
+        }
+        result
     }
 }
 
@@ -618,7 +646,7 @@ impl<N: Unsigned + Clone> tree_hash::TreeHash for Bitfield<Fixed<N>> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<N: 'static + Unsigned> arbitrary::Arbitrary for Bitfield<Fixed<N>> {
+impl<N: 'static + Unsigned> arbitrary::Arbitrary<'_> for Bitfield<Fixed<N>> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let size = N::to_usize();
         let mut vec: Vec<u8> = vec![0u8; size];
@@ -628,7 +656,7 @@ impl<N: 'static + Unsigned> arbitrary::Arbitrary for Bitfield<Fixed<N>> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<N: 'static + Unsigned> arbitrary::Arbitrary for Bitfield<Variable<N>> {
+impl<N: 'static + Unsigned> arbitrary::Arbitrary<'_> for Bitfield<Variable<N>> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let max_size = N::to_usize();
         let rand = usize::arbitrary(u)?;
@@ -698,6 +726,58 @@ mod bitvector {
         assert!(BitVector16::from_ssz_bytes(&[0b0000_0000]).is_err());
         assert!(BitVector16::from_ssz_bytes(&[0b0000_0000, 0b0000_0000]).is_ok());
         assert!(BitVector16::from_ssz_bytes(&[1, 0b0000_0000, 0b0000_0000]).is_err());
+    }
+
+    #[test]
+    fn intersection() {
+        let a = BitVector16::from_raw_bytes(vec![0b1100, 0b0001], 16).unwrap();
+        let b = BitVector16::from_raw_bytes(vec![0b1011, 0b1001], 16).unwrap();
+        let c = BitVector16::from_raw_bytes(vec![0b1000, 0b0001], 16).unwrap();
+
+        assert_eq!(a.intersection(&b), c);
+        assert_eq!(b.intersection(&a), c);
+        assert_eq!(a.intersection(&c), c);
+        assert_eq!(b.intersection(&c), c);
+        assert_eq!(a.intersection(&a), a);
+        assert_eq!(b.intersection(&b), b);
+        assert_eq!(c.intersection(&c), c);
+    }
+
+    #[test]
+    fn intersection_diff_length() {
+        let a = BitVector16::from_bytes(vec![0b0010_1110, 0b0010_1011]).unwrap();
+        let b = BitVector16::from_bytes(vec![0b0010_1101, 0b0000_0001]).unwrap();
+        let c = BitVector16::from_bytes(vec![0b0010_1100, 0b0000_0001]).unwrap();
+
+        assert_eq!(a.len(), 16);
+        assert_eq!(b.len(), 16);
+        assert_eq!(c.len(), 16);
+        assert_eq!(a.intersection(&b), c);
+        assert_eq!(b.intersection(&a), c);
+    }
+
+    #[test]
+    fn union() {
+        let a = BitVector16::from_raw_bytes(vec![0b1100, 0b0001], 16).unwrap();
+        let b = BitVector16::from_raw_bytes(vec![0b1011, 0b1001], 16).unwrap();
+        let c = BitVector16::from_raw_bytes(vec![0b1111, 0b1001], 16).unwrap();
+
+        assert_eq!(a.union(&b), c);
+        assert_eq!(b.union(&a), c);
+        assert_eq!(a.union(&a), a);
+        assert_eq!(b.union(&b), b);
+        assert_eq!(c.union(&c), c);
+    }
+
+    #[test]
+    fn union_diff_length() {
+        let a = BitVector16::from_bytes(vec![0b0010_1011, 0b0010_1110]).unwrap();
+        let b = BitVector16::from_bytes(vec![0b0000_0001, 0b0010_1101]).unwrap();
+        let c = BitVector16::from_bytes(vec![0b0010_1011, 0b0010_1111]).unwrap();
+
+        assert_eq!(a.len(), c.len());
+        assert_eq!(a.union(&b), c);
+        assert_eq!(b.union(&a), c);
     }
 
     #[test]

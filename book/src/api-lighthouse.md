@@ -1,7 +1,7 @@
 # Lighthouse Non-Standard APIs
 
 Lighthouse fully supports the standardization efforts at
-[github.com/ethereum/eth2.0-APIs](https://github.com/ethereum/eth2.0-APIs),
+[github.com/ethereum/beacon-APIs](https://github.com/ethereum/beacon-APIs),
 however sometimes development requires additional endpoints that shouldn't
 necessarily be defined as a broad-reaching standard.  Such endpoints are placed
 behind the `/lighthouse` path.
@@ -27,20 +27,39 @@ curl -X GET "http://localhost:5052/lighthouse/health" -H  "accept: application/j
 ```json
 {
   "data": {
-    "pid": 1728254,
-    "pid_num_threads": 47,
-    "pid_mem_resident_set_size": 510054400,
-    "pid_mem_virtual_memory_size": 3963158528,
-    "sys_virt_mem_total": 16715530240,
-    "sys_virt_mem_available": 4065374208,
-    "sys_virt_mem_used": 11383402496,
-    "sys_virt_mem_free": 1368662016,
-    "sys_virt_mem_percent": 75.67906,
-    "sys_loadavg_1": 4.92,
-    "sys_loadavg_5": 5.53,
-    "sys_loadavg_15": 5.58
+    "sys_virt_mem_total": 16671133696,
+    "sys_virt_mem_available": 8273715200,
+    "sys_virt_mem_used": 7304818688,
+    "sys_virt_mem_free": 2998190080,
+    "sys_virt_mem_percent": 50.37101,
+    "sys_virt_mem_cached": 5013975040,
+    "sys_virt_mem_buffers": 1354149888,
+    "sys_loadavg_1": 2.29,
+    "sys_loadavg_5": 3.48,
+    "sys_loadavg_15": 3.72,
+    "cpu_cores": 4,
+    "cpu_threads": 8,
+    "system_seconds_total": 5728,
+    "user_seconds_total": 33680,
+    "iowait_seconds_total": 873,
+    "idle_seconds_total": 177530,
+    "cpu_time_total": 217447,
+    "disk_node_bytes_total": 358443397120,
+    "disk_node_bytes_free": 70025089024,
+    "disk_node_reads_total": 1141863,
+    "disk_node_writes_total": 1377993,
+    "network_node_bytes_total_received": 2405639308,
+    "network_node_bytes_total_transmit": 328304685,
+    "misc_node_boot_ts_seconds": 1620629638,
+    "misc_os": "linux",
+    "pid": 4698,
+    "pid_num_threads": 25,
+    "pid_mem_resident_set_size": 783757312,
+    "pid_mem_virtual_memory_size": 2564665344,
+    "pid_process_seconds_total": 22
   }
 }
+
 ```
 
 ### `/lighthouse/syncing`
@@ -301,12 +320,131 @@ curl -X GET "http://localhost:5052/lighthouse/eth1/deposit_cache" -H  "accept: a
 
 Obtains a `BeaconState` in SSZ bytes. Useful for obtaining a genesis state.
 
-The `state_id` parameter is identical to that used in the [Standard Eth2.0 API
+The `state_id` parameter is identical to that used in the [Standard Eth2.0 Beacon Node API
 `beacon/state`
-routes](https://ethereum.github.io/eth2.0-APIs/#/Beacon/getStateRoot).
+routes](https://ethereum.github.io/beacon-APIs/#/Beacon/getStateRoot).
 
 ```bash
 curl -X GET "http://localhost:5052/lighthouse/beacon/states/0/ssz" | jq
 ```
 
 *Example omitted for brevity, the body simply contains SSZ bytes.*
+
+### `/lighthouse/liveness`
+
+POST request that checks if any of the given validators have attested in the given epoch. Returns a list
+of objects, each including the validator index, epoch, and `is_live` status of a requested validator.
+
+This endpoint is used in doppelganger detection, and will only provide accurate information for the
+current, previous, or next epoch.
+
+
+```bash
+curl -X POST "http://localhost:5052/lighthouse/liveness" -d '{"indices":["0","1"],"epoch":"1"}' -H  "content-type: application/json" | jq
+```
+
+```json
+{
+    "data": [
+        {
+            "index": "0",
+            "epoch": "1",
+            "is_live": true
+        }
+    ]
+}
+```
+
+### `/lighthouse/database/info`
+
+Information about the database's split point and anchor info.
+
+```bash
+curl "http://localhost:5052/lighthouse/database/info" | jq
+```
+
+```json
+{
+  "schema_version": 5,
+  "split": {
+    "slot": "2034912",
+    "state_root": "0x11c8516aa7d4d1613e84121e3a557ceca34618b4c1a38f05b66ad045ff82b33b"
+  },
+  "anchor": {
+    "anchor_slot": "2034720",
+    "oldest_block_slot": "1958881",
+    "oldest_block_parent": "0x1fd3d855d03e9df28d8a41a0f9cb9d4c540832b3ca1c3e1d7e09cd75b874cc87",
+    "state_upper_limit": "2035712",
+    "state_lower_limit": "0"
+  }
+}
+```
+
+For more information about the split point, see the [Database Configuration](./advanced_database.md)
+docs.
+
+The `anchor` will be `null` unless the node has been synced with checkpoint sync and state
+reconstruction has yet to be completed. For more information
+on the specific meanings of these fields see the docs on [Checkpoint
+Sync](./checkpoint-sync.md#reconstructing-states).
+
+### `/lighthouse/database/reconstruct`
+
+Instruct Lighthouse to begin reconstructing historic states, see
+[Reconstructing States](./checkpoint-sync.md#reconstructing-states). This is an alternative
+to the `--reconstruct-historic-states` flag.
+
+```
+curl -X POST "http://localhost:5052/lighthouse/database/reconstruct" | jq
+```
+
+```json
+"success"
+```
+
+The endpoint will return immediately. See the beacon node logs for an indication of progress.
+
+### `/lighthouse/database/historical_blocks`
+
+Manually provide `SignedBeaconBlock`s to backfill the database. This is intended
+for use by Lighthouse developers during testing only.
+
+### `/lighthouse/block_rewards`
+
+Fetch information about the block rewards paid to proposers for a range of consecutive blocks.
+
+Two query parameters are required:
+
+* `start_slot` (inclusive): the slot of the first block to compute rewards for.
+* `end_slot` (inclusive): the slot of the last block to compute rewards for.
+
+Example:
+
+```bash
+curl "http://localhost:5052/lighthouse/block_rewards?start_slot=1&end_slot=32" | jq
+```
+
+```json
+[
+  {
+    "block_root": "0x51576c2fcf0ab68d7d93c65e6828e620efbb391730511ffa35584d6c30e51410",
+    "attestation_rewards": {
+      "total": 4941156,
+    },
+    ..
+  },
+  ..
+]
+```
+
+Caveats:
+
+* Presently only attestation rewards are computed.
+* The output format is verbose and subject to change. Please see [`BlockReward`][block_reward_src]
+  in the source.
+* For maximum efficiency the `start_slot` should satisfy `start_slot % slots_per_restore_point == 1`.
+  This is because the state _prior_ to the `start_slot` needs to be loaded from the database, and
+  loading a state on a boundary is most efficient.
+
+[block_reward_src]:
+https://github.com/sigp/lighthouse/tree/unstable/common/eth2/src/lighthouse/block_reward.rs

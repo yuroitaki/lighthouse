@@ -1,7 +1,7 @@
 # Lighthouse: Ethereum consensus client
 
 An open-source Ethereum consensus client, written in Rust and maintained by Sigma Prime.
-P/S: This is a forked repository maintained by Yuro Itaki.
+P/S: This is a forked repository maintained by Yuro Itaki san.
 
 [![Book Status]][Book Link] [![Chat Badge]][Chat Link]
 
